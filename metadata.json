@@ -1,0 +1,8 @@
+{
+  "name": "Rugga 27",
+  "description": "Rugga 27 — Deep 2D Rugby Union Management Simulation with authentic URC clubs, realistic rivalries, tactical matchdays, and genuine positional versatility.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
