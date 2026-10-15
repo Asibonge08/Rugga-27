@@ -299,6 +299,9 @@ export interface Club {
   accentColor: string;
   stadiumName: string;
   stadiumCapacity: number;
+  city?: string;
+  pitchType?: 'Natural Hybrid Grass' | 'Synthetic Turf' | 'Standard Grass' | string;
+  weatherProfile?: 'Dry' | 'Wet' | 'Windy';
   reputation: number;        // 1-100
   transferBudget: number;    // Currency in GBP
   wageBudget: number;        // Weekly wage budget

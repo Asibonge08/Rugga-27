@@ -5,7 +5,7 @@ import { soundFx } from '../services/soundFx';
 import { useCurrency } from '../services/currencyService';
 import { CurrencySelector } from './CurrencySelector';
 import { getRivalry } from '../data/rugbyRivalries';
-import { Play, Shield, Trophy, Users, Sparkles, ChevronRight, Volume2, VolumeX, Dices, Swords, X, Flame, Database } from 'lucide-react';
+import { Play, Shield, Trophy, Users, Sparkles, ChevronRight, Volume2, VolumeX, Dices, Swords, X, Flame, Database, Sliders } from 'lucide-react';
 
 interface TitleScreenProps {
   onStartCareer: (clubId: string, managerName: string) => void;
@@ -13,6 +13,7 @@ interface TitleScreenProps {
   onQuickMatch: (homeClubId: string, awayClubId: string, userClubId: string) => void;
   hasExistingSave: boolean;
   onOpenRegistry?: () => void;
+  onOpenEditHub?: () => void;
 }
 
 export const TitleScreen: React.FC<TitleScreenProps> = ({
@@ -20,7 +21,8 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   onResumeCareer,
   onQuickMatch,
   hasExistingSave,
-  onOpenRegistry
+  onOpenRegistry,
+  onOpenEditHub
 }) => {
   const [selectedLeague, setSelectedLeague] = useState<LeagueId>('URC');
   const [selectedClubId, setSelectedClubId] = useState<string>('leinster');
@@ -164,6 +166,18 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             >
               <Trophy className="w-4 h-4 text-emerald-400" />
               <span>START NEW CAREER</span>
+            </button>
+
+            {/* Edit Hub / Customise Button */}
+            <button
+              onClick={() => {
+                soundFx.playClick();
+                if (onOpenEditHub) onOpenEditHub();
+              }}
+              className="w-full py-3.5 px-6 rounded-xl bg-[#0d1f15] hover:bg-[#142e20] border border-emerald-500/40 hover:border-emerald-400 text-emerald-300 hover:text-white font-heading font-black text-sm tracking-wider flex items-center justify-center space-x-2.5 transition-all cursor-pointer shadow-md"
+            >
+              <Sliders className="w-4 h-4 text-emerald-400" />
+              <span>EDIT HUB / CUSTOMISE</span>
             </button>
 
             {/* Kick Off Button */}

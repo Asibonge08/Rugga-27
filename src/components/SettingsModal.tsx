@@ -9,6 +9,7 @@ interface SettingsModalProps {
   onExportSave: () => string;
   onImportSave: (json: string) => boolean;
   onRestartCareer: () => void;
+  onOpenEditHub?: () => void;
   clubCountry?: string;
 }
 
@@ -18,6 +19,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onExportSave,
   onImportSave,
   onRestartCareer,
+  onOpenEditHub,
   clubCountry
 }) => {
   const [isMuted, setIsMuted] = useState<boolean>(soundFx.getMuted());
@@ -130,8 +132,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </div>
 
+          {/* Edit Hub / Customise */}
+          {onOpenEditHub && (
+            <div className="pt-2">
+              <button
+                onClick={() => {
+                  onClose();
+                  onOpenEditHub();
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-neutral-800 hover:bg-neutral-750 border border-emerald-500/30 text-emerald-300 font-semibold flex items-center justify-center space-x-1.5 cursor-pointer transition-all"
+              >
+                <span>Open Edit Hub (Teams, Stadiums & Players)</span>
+              </button>
+            </div>
+          )}
+
           {/* Restart Career */}
-          <div className="pt-2">
+          <div className="pt-1">
             <button
               onClick={() => {
                 if (confirm('Start a new career? This will reset current season progress.')) {

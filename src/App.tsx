@@ -15,6 +15,7 @@ import { UrcRegistryView } from './components/UrcRegistryView';
 import { SettingsModal } from './components/SettingsModal';
 import { CurrencySelector } from './components/CurrencySelector';
 import { CoinStoreModal } from './components/CoinStoreModal';
+import { EditHubView } from './components/EditHubView';
 import { soundFx } from './services/soundFx';
 import { INITIAL_CLUBS } from './data/rugbyDatabase';
 import { Fixture } from './types/rugby';
@@ -38,7 +39,7 @@ import {
 
 export function App() {
   const [careerState, setCareerState] = useState<CareerState>(careerManager.getState());
-  const [currentScreen, setCurrentScreen] = useState<'title' | 'career' | 'matchday'>('title');
+  const [currentScreen, setCurrentScreen] = useState<'title' | 'career' | 'matchday' | 'edithub'>('title');
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [activeMatchdayFixtureId, setActiveMatchdayFixtureId] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
@@ -139,6 +140,7 @@ export function App() {
           onQuickMatch={handleQuickMatch}
           hasExistingSave={true}
           onOpenRegistry={() => setIsRegistryModalOpen(true)}
+          onOpenEditHub={() => setCurrentScreen('edithub')}
         />
         {isRegistryModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/90 backdrop-blur-md">
@@ -160,6 +162,11 @@ export function App() {
         )}
       </>
     );
+  }
+
+  // Edit Hub / Customise Screen
+  if (currentScreen === 'edithub') {
+    return <EditHubView onBack={() => setCurrentScreen('title')} />;
   }
 
   // Active Matchday Screen
@@ -428,6 +435,10 @@ export function App() {
         onExportSave={() => careerManager.exportSaveJSON()}
         onImportSave={(json) => careerManager.importSaveJSON(json)}
         onRestartCareer={() => setCurrentScreen('title')}
+        onOpenEditHub={() => {
+          setIsSettingsOpen(false);
+          setCurrentScreen('edithub');
+        }}
         clubCountry={userClub.country}
       />
 

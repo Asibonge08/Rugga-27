@@ -1,5 +1,5 @@
-import { Club, Player, LeagueId, TacticsConfig, MatchSelection, LeagueTableRow, Fixture, InboxMessage, TransferOffer, ScoutingAssignment, StaffMember } from '../types/rugby';
-import { INITIAL_CLUBS, generateClubSquad, generateFixturesForLeague, calculatePlayerOverall, POSITIONS_ORDER } from '../data/rugbyDatabase';
+import { Club, Player, LeagueId, TacticsConfig, MatchSelection, LeagueTableRow, Fixture, InboxMessage, TransferOffer, ScoutingAssignment, StaffMember, RugbyPosition, FORWARD_POSITIONS, isFrontRow, PlayerAttributes } from '../types/rugby';
+import { INITIAL_CLUBS, generateClubSquad, generateFixturesForLeague, calculatePlayerOverall, POSITIONS_ORDER, getPositionShort } from '../data/rugbyDatabase';
 import { getRivalry, calculateFanSatisfactionDelta } from '../data/rugbyRivalries';
 import { urcRegistry } from './urcRegistryService';
 
@@ -57,12 +57,24 @@ export class CareerManager {
   }
 
   public createNewCareer(userClubId: string, managerName: string): CareerState {
-    const clubs: Club[] = JSON.parse(JSON.stringify(INITIAL_CLUBS)).map((c: Club) => ({
-      ...c,
-      isUserControlled: c.id === userClubId,
-      fanSatisfaction: c.fanSatisfaction ?? 82,
-      rivalryH2H: {}
-    }));
+    let customClubsMap: Record<string, Partial<Club>> = {};
+    try {
+      const stored = localStorage.getItem('rugga_27_custom_clubs_v1');
+      if (stored) customClubsMap = JSON.parse(stored);
+    } catch {
+      // storage unavailable
+    }
+
+    const clubs: Club[] = JSON.parse(JSON.stringify(INITIAL_CLUBS)).map((c: Club) => {
+      const overrides = customClubsMap[c.id] || {};
+      return {
+        ...c,
+        ...overrides,
+        isUserControlled: c.id === userClubId,
+        fanSatisfaction: c.fanSatisfaction ?? 82,
+        rivalryH2H: {}
+      };
+    });
 
     // Generate squads for all clubs
     let players: Player[] = [];
@@ -312,6 +324,54 @@ export class CareerManager {
     urcRegistry.updatePlayer(refinedPlayer);
 
     this.notify();
+  }
+
+  /**
+   * Update club details (Team Name, Short Name, Stadium, Kit Colors, Pitch Type, Weather)
+   */
+  public updateClubDetails(clubId: string, updates: Partial<Club>): void {
+    const club = this.state.clubs.find(c => c.id === clubId);
+    if (!club) return;
+    Object.assign(club, updates);
+    this.notify();
+  }
+
+  /**
+   * Batch Edit players: apply uniform adjustments to multiple players in a single step
+   */
+  public batchUpdatePlayers(
+    playerIds: string[],
+    updates: {
+      fitness?: number;
+      fatigue?: number;
+      potential?: number;
+      potentialDelta?: number;
+      morale?: number;
+      form?: number;
+      squadRole?: Player['squadRole'];
+    }
+  ): number {
+    let count = 0;
+    playerIds.forEach(id => {
+      const p = this.state.players.find(player => player.id === id);
+      if (p) {
+        if (updates.fitness !== undefined) p.fitness = Math.max(1, Math.min(100, updates.fitness));
+        if (updates.fatigue !== undefined) p.fatigue = Math.max(0, Math.min(100, updates.fatigue));
+        if (updates.potential !== undefined) p.potential = Math.max(p.overall, Math.min(99, updates.potential));
+        if (updates.potentialDelta !== undefined) p.potential = Math.max(p.overall, Math.min(99, p.potential + updates.potentialDelta));
+        if (updates.morale !== undefined) p.morale = Math.max(1, Math.min(100, updates.morale));
+        if (updates.form !== undefined) p.form = Math.max(1, Math.min(10, updates.form));
+        if (updates.squadRole !== undefined) p.squadRole = updates.squadRole;
+
+        urcRegistry.updatePlayer(p);
+        count++;
+      }
+    });
+
+    if (count > 0) {
+      this.notify();
+    }
+    return count;
   }
 
   // --- Rugby Nations Standard Coin System ---
@@ -884,25 +944,330 @@ export class CareerManager {
     return { success: true, message: `Sold ${player.name} to ${buyer.name} for £${fee.toLocaleString()}` };
   }
 
-  public promoteYouthPlayer(playerId: string) {
+  /**
+   * Promote an academy player to the Senior First Team
+   */
+  public promoteYouthPlayer(playerId: string): { success: boolean; message: string } {
     const prospectIdx = this.state.youthProspects.findIndex(p => p.id === playerId);
-    if (prospectIdx !== -1) {
-      const p = this.state.youthProspects.splice(prospectIdx, 1)[0];
-      p.squadRole = 'Squad Rotation';
-      this.state.players.push(p);
+    if (prospectIdx === -1) {
+      return { success: false, message: 'Prospect not found in academy' };
+    }
 
+    const p = this.state.youthProspects.splice(prospectIdx, 1)[0];
+    p.squadRole = 'Squad Rotation';
+    p.contractYearsLeft = Math.max(2, p.contractYearsLeft);
+    this.state.players.push(p);
+
+    this.state.inbox.unshift({
+      id: `prospect_pro_${p.id}_${Date.now()}`,
+      date: `Week ${this.state.weekNumber}`,
+      sender: 'Academy Director',
+      subject: `Academy graduate ${p.name} promoted to Senior First Team!`,
+      body: `Exciting young talent ${p.name} (Age ${p.age}, OVR ${p.overall}, POT ${p.potential}) has signed his first professional senior contract. He is now registered for senior matchday selection.`,
+      category: 'BOARD',
+      read: false
+    });
+
+    this.notify();
+    return { success: true, message: `Promoted ${p.name} to the senior squad!` };
+  }
+
+  /**
+   * Demote an existing senior squad player (aged <= 23) into the Academy to focus on development
+   */
+  public demoteToAcademy(playerId: string): { success: boolean; message: string } {
+    const pIdx = this.state.players.findIndex(p => p.id === playerId);
+    if (pIdx === -1) {
+      return { success: false, message: 'Player not found in senior squad' };
+    }
+
+    const player = this.state.players[pIdx];
+
+    // Academy Eligibility Rule: Hard age limit of 23 years old (Age <= 23)
+    if (player.age > 23) {
+      return {
+        success: false,
+        message: `Ineligible: ${player.name} is ${player.age} years old. The Academy strictly enforces a maximum age limit of 23 (U23).`
+      };
+    }
+
+    // Remove from senior lineup if selected
+    Object.keys(this.state.userLineup.startingXV).forEach(k => {
+      if (this.state.userLineup.startingXV[Number(k)] === player.id) {
+        delete this.state.userLineup.startingXV[Number(k)];
+      }
+    });
+    Object.keys(this.state.userLineup.bench).forEach(k => {
+      if (this.state.userLineup.bench[Number(k)] === player.id) {
+        delete this.state.userLineup.bench[Number(k)];
+      }
+    });
+
+    // Remove from senior squad and add to academy
+    this.state.players.splice(pIdx, 1);
+    player.squadRole = 'Youth Prospect';
+    this.state.youthProspects.push(player);
+
+    this.state.inbox.unshift({
+      id: `demote_${player.id}_${Date.now()}`,
+      date: `Week ${this.state.weekNumber}`,
+      sender: 'Academy Director',
+      subject: `${player.name} assigned to Youth Academy development`,
+      body: `${player.name} (Age ${player.age}) has transitioned to the Youth Academy roster to focus on intensive technical conditioning and accelerated growth.`,
+      category: 'BOARD',
+      read: false
+    });
+
+    this.notify();
+    return { success: true, message: `${player.name} assigned to the Youth Academy.` };
+  }
+
+  /**
+   * Manually add a custom created academy player (Name, Age 16-21, Position, Base Stats, Potential)
+   */
+  public addAcademyPlayer(data: {
+    name: string;
+    age: number;
+    primaryPosition: RugbyPosition;
+    potential: number;
+    baseOverall?: number;
+  }): Player {
+    const userClub = this.state.clubs.find(c => c.id === this.state.userClubId);
+    const country = userClub?.country || 'South Africa';
+    const baseVal = data.baseOverall || Math.max(58, data.potential - 14);
+
+    const isForward = FORWARD_POSITIONS.includes(data.primaryPosition);
+    const isFront = isFrontRow(data.primaryPosition);
+
+    const attrs: PlayerAttributes = {
+      scrummaging: isFront ? baseVal + 5 : isForward ? baseVal : baseVal - 15,
+      hooking: data.primaryPosition === 'HOOKER' ? baseVal + 6 : 40,
+      lineout: data.primaryPosition === 'LOCK_4' || data.primaryPosition === 'LOCK_5' ? baseVal + 6 : isForward ? baseVal : 35,
+      breakdown: isForward ? baseVal + 3 : baseVal - 4,
+      tackling: isForward ? baseVal + 4 : baseVal - 2,
+      carrying: baseVal + 2,
+      offloading: baseVal - 2,
+      passing: !isForward ? baseVal + 4 : baseVal - 5,
+      kicking: data.primaryPosition === 'FLY_HALF' || data.primaryPosition === 'FULLBACK' ? baseVal + 6 : baseVal - 15,
+      goalKicking: data.primaryPosition === 'FLY_HALF' ? baseVal + 8 : 45,
+      speed: !isForward ? baseVal + 6 : baseVal - 3,
+      strength: isForward ? baseVal + 5 : baseVal - 2,
+      fitness: 85,
+      tacticalAwareness: baseVal - 4,
+      workRate: baseVal + 4,
+      consistency: baseVal - 2
+    };
+
+    const overall = calculatePlayerOverall(data.primaryPosition, attrs);
+    const newProspect: Player = {
+      id: `custom_acad_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      name: data.name.trim() || 'Young Prospect',
+      nationality: country,
+      age: Math.min(23, Math.max(16, data.age)),
+      clubId: this.state.userClubId,
+      primaryPosition: data.primaryPosition,
+      secondaryPositions: [],
+      heightCm: isForward ? 192 : 182,
+      weightKg: isForward ? 106 : 88,
+      attributes: attrs,
+      potential: Math.min(99, Math.max(overall, data.potential)),
+      overall,
+      marketValue: 80000 + (overall * 3500),
+      weeklyWage: 650,
+      contractYearsLeft: 3,
+      squadRole: 'Youth Prospect',
+      fitness: 100,
+      fatigue: 0,
+      morale: 92,
+      form: 7,
+      injury: null,
+      stats: {
+        matchesPlayed: 0,
+        tries: 0,
+        conversions: 0,
+        penalties: 0,
+        dropGoals: 0,
+        points: 0,
+        tacklesMade: 0,
+        tacklesMissed: 0,
+        turnoversWon: 0,
+        metresCarried: 0,
+        yellowCards: 0,
+        redCards: 0,
+        avgRating: 7.0
+      }
+    };
+
+    this.state.youthProspects.push(newProspect);
+
+    this.state.inbox.unshift({
+      id: `add_acad_${newProspect.id}`,
+      date: `Week ${this.state.weekNumber}`,
+      sender: 'Academy Director',
+      subject: `New Prospect Inducted: ${newProspect.name}`,
+      body: `Custom academy recruit ${newProspect.name} (${getPositionShort(newProspect.primaryPosition)}, Age ${newProspect.age}) has joined the youth development cohort. Rated OVR ${newProspect.overall} with a projected ceiling of POT ${newProspect.potential}.`,
+      category: 'BOARD',
+      read: false
+    });
+
+    this.notify();
+    return newProspect;
+  }
+
+  /**
+   * Release an academy player
+   */
+  public releaseAcademyPlayer(playerId: string): void {
+    const idx = this.state.youthProspects.findIndex(p => p.id === playerId);
+    if (idx !== -1) {
+      const removed = this.state.youthProspects.splice(idx, 1)[0];
+      this.notify();
+    }
+  }
+
+  /**
+   * Auto-Scouted / AI-Generated: Generate 3-5 realistic youth regens/prospects into Academy
+   */
+  public generateYouthIntake(count: number = 4): Player[] {
+    const intake = this.generateYouthBatch(this.state.userClubId, count);
+    this.state.youthProspects = [...this.state.youthProspects, ...intake];
+
+    this.state.inbox.unshift({
+      id: `intake_${Date.now()}`,
+      date: `Week ${this.state.weekNumber}`,
+      sender: 'Head of Youth Recruitment',
+      subject: `🎓 New Academy Scouting Intake: ${intake.length} Prospects Signed!`,
+      body: `Our regional scouts have enrolled ${intake.length} promising teenagers into the Academy:\n` +
+        intake.map(p => `• ${p.name} (${getPositionShort(p.primaryPosition)}, Age ${p.age}, OVR ${p.overall}, POT ${p.potential})`).join('\n') +
+        `\n\nMonitor their growth and prepare high-ceiling prospects for senior promotion.`,
+      category: 'SCOUTING',
+      read: false
+    });
+
+    this.notify();
+    return intake;
+  }
+
+  /**
+   * Background Development Engine (Simulated Growth):
+   * Runs the official progression algorithm:
+   * - If Current Rating < Potential Rating:
+   *   - Baseline growth: +1 to +2 OVR points depending on Potential ceiling & Academy facility tier
+   *   - High-potential prodigies (Gap >= 10 points): up to +3 OVR
+   *   - Age 22-23 growth slows to +1 max
+   * - Hard age limit 23: players turning 24 cannot develop further in academy and must be promoted/released.
+   * - Re-calculate individual key attributes proportionally according to player's position.
+   */
+  public simulateYouthGrowth(): {
+    developedCount: number;
+    reports: { player: Player; ovrGain: number; oldOvr: number; newOvr: number; keyBoosts: string }[];
+  } {
+    const userClub = this.state.clubs.find(c => c.id === this.state.userClubId);
+    const academyTier = userClub?.facilities.academy || 3;
+    const reports: { player: Player; ovrGain: number; oldOvr: number; newOvr: number; keyBoosts: string }[] = [];
+
+    this.state.youthProspects.forEach(p => {
+      // Hard age limit: players >= 24 must be promoted or released
+      if (p.age >= 24) return;
+
+      if (p.overall < p.potential) {
+        const gap = p.potential - p.overall;
+        let ovrGain = 1;
+
+        // High potential prodigies (Gap >= 10 points) can receive up to +3 OVR
+        if (gap >= 10 && p.age <= 20) {
+          ovrGain = Math.min(3, 1 + (academyTier >= 4 ? 2 : 1));
+        } else if (gap >= 6 && p.age <= 21) {
+          ovrGain = Math.min(2, 1 + (academyTier >= 3 ? 1 : 0));
+        } else if (p.age >= 22) {
+          // Age 22-23 growth slows to +1 max
+          ovrGain = 1;
+        }
+
+        // Cap at potential
+        ovrGain = Math.min(ovrGain, p.potential - p.overall);
+
+        if (ovrGain > 0) {
+          const oldOvr = p.overall;
+          p.overall += ovrGain;
+
+          // Proportionally distribute attribute gains based on Rugby Position
+          const boosts: string[] = [];
+          const pos = p.primaryPosition;
+
+          if (pos === 'LH_PROP' || pos === 'TH_PROP') {
+            p.attributes.scrummaging = Math.min(99, p.attributes.scrummaging + ovrGain + 1);
+            p.attributes.strength = Math.min(99, p.attributes.strength + ovrGain + 1);
+            p.attributes.tackling = Math.min(99, p.attributes.tackling + ovrGain);
+            p.attributes.workRate = Math.min(99, p.attributes.workRate + ovrGain);
+            boosts.push('Scrummaging +2', 'Strength +2', 'Tackling +1');
+          } else if (pos === 'HOOKER') {
+            p.attributes.hooking = Math.min(99, p.attributes.hooking + ovrGain + 1);
+            p.attributes.scrummaging = Math.min(99, p.attributes.scrummaging + ovrGain);
+            p.attributes.breakdown = Math.min(99, p.attributes.breakdown + ovrGain + 1);
+            boosts.push('Hooking +2', 'Breakdown +2', 'Scrummaging +1');
+          } else if (pos === 'LOCK_4' || pos === 'LOCK_5') {
+            p.attributes.lineout = Math.min(99, p.attributes.lineout + ovrGain + 1);
+            p.attributes.strength = Math.min(99, p.attributes.strength + ovrGain + 1);
+            p.attributes.tackling = Math.min(99, p.attributes.tackling + ovrGain);
+            boosts.push('Lineout +2', 'Strength +2', 'Tackling +1');
+          } else if (pos === 'BLINDSIDE_FLANKER' || pos === 'OPENSIDE_FLANKER' || pos === 'NUMBER_8') {
+            p.attributes.breakdown = Math.min(99, p.attributes.breakdown + ovrGain + 1);
+            p.attributes.tackling = Math.min(99, p.attributes.tackling + ovrGain + 1);
+            p.attributes.carrying = Math.min(99, p.attributes.carrying + ovrGain);
+            boosts.push('Breakdown & Jackal +2', 'Tackling +2', 'Carrying +1');
+          } else if (pos === 'SCRUM_HALF') {
+            p.attributes.passing = Math.min(99, p.attributes.passing + ovrGain + 1);
+            p.attributes.speed = Math.min(99, p.attributes.speed + ovrGain + 1);
+            p.attributes.tacticalAwareness = Math.min(99, p.attributes.tacticalAwareness + ovrGain);
+            boosts.push('Bullet Passing +2', 'Speed +2', 'Tactical IQ +1');
+          } else if (pos === 'FLY_HALF') {
+            p.attributes.kicking = Math.min(99, p.attributes.kicking + ovrGain + 1);
+            p.attributes.goalKicking = Math.min(99, p.attributes.goalKicking + ovrGain + 1);
+            p.attributes.passing = Math.min(99, p.attributes.passing + ovrGain);
+            p.attributes.tacticalAwareness = Math.min(99, p.attributes.tacticalAwareness + ovrGain);
+            boosts.push('Tactical Kicking +2', 'Goal Kicking +2', 'Vision +1');
+          } else if (pos === 'INSIDE_CENTRE' || pos === 'OUTSIDE_CENTRE') {
+            p.attributes.tackling = Math.min(99, p.attributes.tackling + ovrGain + 1);
+            p.attributes.carrying = Math.min(99, p.attributes.carrying + ovrGain + 1);
+            p.attributes.offloading = Math.min(99, p.attributes.offloading + ovrGain);
+            boosts.push('Midfield Defence +2', 'Hard Carrying +2', 'Offloading +1');
+          } else {
+            // Wings & Fullback
+            p.attributes.speed = Math.min(99, p.attributes.speed + ovrGain + 1);
+            p.attributes.carrying = Math.min(99, p.attributes.carrying + ovrGain);
+            p.attributes.kicking = Math.min(99, p.attributes.kicking + ovrGain);
+            boosts.push('Pace & Sprint +2', 'Finishing +1', 'High Ball +1');
+          }
+
+          p.marketValue = Math.round(p.marketValue * (1 + (ovrGain * 0.12)));
+          reports.push({
+            player: p,
+            ovrGain,
+            oldOvr,
+            newOvr: p.overall,
+            keyBoosts: boosts.join(', ')
+          });
+        }
+      }
+    });
+
+    if (reports.length > 0) {
       this.state.inbox.unshift({
-        id: `prospect_pro_${p.id}`,
+        id: `acad_growth_${Date.now()}`,
         date: `Week ${this.state.weekNumber}`,
-        sender: 'Academy Director',
-        subject: `Academy graduate ${p.name} promoted to Senior First Team!`,
-        body: `Exciting young talent ${p.name} has impressed the coaching staff and has signed his first professional contract. He is now registered for senior competition.`,
+        sender: 'Academy Performance Director',
+        subject: `📈 Youth Academy Growth Review: ${reports.length} Prospects Improved!`,
+        body: `Our off-screen academy match development and technical training cycles yielded positive progression:\n` +
+          reports.map(r => `• ${r.player.name} (${getPositionShort(r.player.primaryPosition)}): +${r.ovrGain} OVR (${r.oldOvr} ➔ ${r.newOvr}) [${r.keyBoosts}]`).join('\n') +
+          `\n\nAcademy Facility Tier: ${academyTier}/5. High-performing prospects are nearing senior readiness!`,
         category: 'BOARD',
         read: false
       });
-
       this.notify();
     }
+
+    return { developedCount: reports.length, reports };
   }
 
   public upgradeFacility(facilityKey: keyof Club['facilities']): { success: boolean; message: string } {

@@ -71,7 +71,62 @@ export const SquadView: React.FC<SquadViewProps> = ({
   const [sortField, setSortField] = useState<keyof Player | 'overall'>('overall');
   const [sortAsc, setSortAsc] = useState<boolean>(false);
 
+  // Batch Edit Mode state
+  const [isBatchMode, setIsBatchMode] = useState<boolean>(false);
+  const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
+  const [batchToast, setBatchToast] = useState<string | null>(null);
+  const [batchActionType, setBatchActionType] = useState<'fitness' | 'potential' | 'morale' | 'form' | 'role'>('fitness');
+  const [batchPotentialVal, setBatchPotentialVal] = useState<number>(85);
+  const [batchRoleVal, setBatchRoleVal] = useState<Player['squadRole']>('First XV');
+
   const clubPlayers = players.filter(p => p.clubId === userClubId);
+
+  const toggleSelectPlayer = (id: string) => {
+    setSelectedPlayerIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  };
+
+  const handleSelectAll = (filterType?: 'ALL' | 'FORWARDS' | 'BACKS') => {
+    soundFx.playClick();
+    if (filterType === 'FORWARDS') {
+      setSelectedPlayerIds(clubPlayers.filter(p => FORWARD_POSITIONS.includes(p.primaryPosition)).map(p => p.id));
+    } else if (filterType === 'BACKS') {
+      setSelectedPlayerIds(clubPlayers.filter(p => BACK_POSITIONS.includes(p.primaryPosition)).map(p => p.id));
+    } else {
+      setSelectedPlayerIds(clubPlayers.map(p => p.id));
+    }
+  };
+
+  const handleClearSelection = () => {
+    soundFx.playClick();
+    setSelectedPlayerIds([]);
+  };
+
+  const handleApplyBatchAction = () => {
+    if (selectedPlayerIds.length === 0) return;
+    soundFx.playWhistle('short');
+
+    let count = 0;
+    if (batchActionType === 'fitness') {
+      count = careerManager.batchUpdatePlayers(selectedPlayerIds, { fitness: 100, fatigue: 0 });
+      setBatchToast(`✓ Reset fitness & stamina to 100% for ${count} players`);
+    } else if (batchActionType === 'potential') {
+      count = careerManager.batchUpdatePlayers(selectedPlayerIds, { potential: batchPotentialVal });
+      setBatchToast(`✓ Updated Potential to ${batchPotentialVal} for ${count} players`);
+    } else if (batchActionType === 'morale') {
+      count = careerManager.batchUpdatePlayers(selectedPlayerIds, { morale: 100 });
+      setBatchToast(`✓ Set morale to 100% for ${count} players`);
+    } else if (batchActionType === 'form') {
+      count = careerManager.batchUpdatePlayers(selectedPlayerIds, { form: 8 });
+      setBatchToast(`✓ Set match form to 8.0 for ${count} players`);
+    } else if (batchActionType === 'role') {
+      count = careerManager.batchUpdatePlayers(selectedPlayerIds, { squadRole: batchRoleVal });
+      setBatchToast(`✓ Set squad role to '${batchRoleVal}' for ${count} players`);
+    }
+
+    setTimeout(() => setBatchToast(null), 3500);
+  };
 
   // Formation coordinates on 2D visual board (x% from 0 to 100, y% from 0 to 100)
   const pitchPositions: { jersey: number; role: string; x: number; y: number }[] = [
@@ -178,7 +233,7 @@ export const SquadView: React.FC<SquadViewProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center space-x-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => {
               soundFx.playClick();
@@ -188,8 +243,27 @@ export const SquadView: React.FC<SquadViewProps> = ({
             title="World Rugby Positional Eligibility Guide"
           >
             <HelpCircle className="w-3.5 h-3.5 text-amber-400" />
-            <span>Rugby Rules Guide</span>
+            <span>Rules Guide</span>
           </button>
+
+          <button
+            onClick={() => {
+              soundFx.playClick();
+              const nextMode = !isBatchMode;
+              setIsBatchMode(nextMode);
+              if (nextMode) setViewMode('table');
+            }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 cursor-pointer transition-all shadow-sm ${
+              isBatchMode
+                ? 'bg-amber-600 text-white font-bold ring-2 ring-amber-400/50'
+                : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white border border-neutral-700'
+            }`}
+            title="Batch Edit multiple players simultaneously"
+          >
+            <Edit3 className="w-3.5 h-3.5 text-amber-300" />
+            <span>Batch Edit {selectedPlayerIds.length > 0 ? `(${selectedPlayerIds.length})` : ''}</span>
+          </button>
+
           <button
             onClick={() => {
               soundFx.playClick();
@@ -201,6 +275,7 @@ export const SquadView: React.FC<SquadViewProps> = ({
             <Sliders className="w-3.5 h-3.5" />
             <span>Edit Player</span>
           </button>
+
           <button
             onClick={() => {
               soundFx.playClick();
@@ -225,6 +300,137 @@ export const SquadView: React.FC<SquadViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Batch Toast */}
+      {batchToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-emerald-600 text-white px-4 py-2.5 rounded-2xl shadow-2xl border border-emerald-400 font-semibold text-xs sm:text-sm flex items-center space-x-2 animate-in fade-in">
+          <CheckCircle2 className="w-4 h-4 text-white" />
+          <span>{batchToast}</span>
+        </div>
+      )}
+
+      {/* BATCH EDIT CONTROLS PANEL */}
+      {isBatchMode && (
+        <div className="bg-gradient-to-r from-neutral-900 via-neutral-900 to-amber-950/30 border border-amber-500/40 p-4 rounded-2xl shadow-2xl space-y-3 animate-in fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-neutral-800 pb-2.5">
+            <div className="flex items-center space-x-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+              <span className="font-heading font-black text-sm text-white uppercase tracking-wide">
+                Batch Player Edit Active
+              </span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-mono font-bold">
+                {selectedPlayerIds.length} Selected
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+              <button
+                onClick={() => handleSelectAll('ALL')}
+                className="px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white cursor-pointer"
+              >
+                Select All
+              </button>
+              <button
+                onClick={() => handleSelectAll('FORWARDS')}
+                className="px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white cursor-pointer"
+              >
+                Forwards Pack
+              </button>
+              <button
+                onClick={() => handleSelectAll('BACKS')}
+                className="px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white cursor-pointer"
+              >
+                Backline
+              </button>
+              <button
+                onClick={handleClearSelection}
+                className="px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-red-400 cursor-pointer"
+              >
+                Clear Selection
+              </button>
+            </div>
+          </div>
+
+          {/* Adjustment Types & Action Form */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-center">
+            <div className="space-y-1">
+              <label className="text-[11px] text-neutral-400 font-semibold block">Select Common Adjustment:</label>
+              <select
+                value={batchActionType}
+                onChange={(e) => setBatchActionType(e.target.value as any)}
+                className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3 py-2 text-xs font-semibold text-white focus:outline-none focus:border-amber-500 cursor-pointer"
+              >
+                <option value="fitness">Reset Fitness to 100% (0% Fatigue)</option>
+                <option value="potential">Set Uniform Potential Ceiling</option>
+                <option value="morale">Max Out Morale (100%)</option>
+                <option value="form">Set Match Form to Sharp (8.0)</option>
+                <option value="role">Set Squad Contract Role</option>
+              </select>
+            </div>
+
+            {/* Sub-controls based on batchActionType */}
+            <div>
+              {batchActionType === 'potential' && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[11px] text-neutral-300">
+                    <span>Target Potential Rating:</span>
+                    <span className="font-mono font-bold text-amber-400">{batchPotentialVal} POT</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="70"
+                    max="99"
+                    value={batchPotentialVal}
+                    onChange={(e) => setBatchPotentialVal(Number(e.target.value))}
+                    className="w-full accent-amber-500 cursor-pointer"
+                  />
+                </div>
+              )}
+
+              {batchActionType === 'role' && (
+                <div className="space-y-1">
+                  <label className="text-[11px] text-neutral-400 font-semibold block">Target Squad Role:</label>
+                  <select
+                    value={batchRoleVal}
+                    onChange={(e) => setBatchRoleVal(e.target.value as any)}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3 py-2 text-xs font-semibold text-white focus:outline-none cursor-pointer"
+                  >
+                    <option value="First XV">First XV Starter</option>
+                    <option value="Squad Rotation">Squad Rotation</option>
+                    <option value="Key Player">Key Player (Marquee)</option>
+                    <option value="Youth Prospect">Youth Prospect</option>
+                    <option value="Reserve">Reserve</option>
+                  </select>
+                </div>
+              )}
+
+              {(batchActionType === 'fitness' || batchActionType === 'morale' || batchActionType === 'form') && (
+                <div className="text-xs text-neutral-400 bg-neutral-950/80 p-2.5 rounded-xl border border-neutral-800">
+                  {batchActionType === 'fitness' && 'Will fully restore aerobic engine (100%) and clear all match fatigue across selected players.'}
+                  {batchActionType === 'morale' && 'Will elevate team locker room confidence to maximum 100% contentment.'}
+                  {batchActionType === 'form' && 'Sets competitive matchday form rating to 8.0/10 sharp.'}
+                </div>
+              )}
+            </div>
+
+            {/* Execute Button */}
+            <div className="flex items-center space-x-2 sm:justify-end">
+              <button
+                disabled={selectedPlayerIds.length === 0}
+                onClick={handleApplyBatchAction}
+                className={`w-full sm:w-auto px-5 py-2.5 rounded-xl font-heading font-black text-xs tracking-wider flex items-center justify-center space-x-2 transition-all shadow-lg ${
+                  selectedPlayerIds.length > 0
+                    ? 'bg-amber-600 hover:bg-amber-500 text-white cursor-pointer shadow-amber-950/40'
+                    : 'bg-neutral-800 text-neutral-500 cursor-not-allowed'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>APPLY ADJUSTMENT ({selectedPlayerIds.length})</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* PITCH VISUALIZER VIEW */}
       {viewMode === 'pitch' && (
@@ -381,6 +587,20 @@ export const SquadView: React.FC<SquadViewProps> = ({
             <table className="w-full text-xs text-left">
               <thead>
                 <tr className="text-[10px] text-neutral-400 uppercase font-semibold border-b border-neutral-800 bg-neutral-950/60">
+                  {isBatchMode && (
+                    <th className="py-2.5 px-3 text-center w-10">
+                      <input
+                        type="checkbox"
+                        checked={selectedPlayerIds.length === filteredPlayers.length && filteredPlayers.length > 0}
+                        onChange={(e) => {
+                          if (e.target.checked) handleSelectAll();
+                          else handleClearSelection();
+                        }}
+                        className="w-4 h-4 rounded accent-amber-500 cursor-pointer"
+                        title="Select All"
+                      />
+                    </th>
+                  )}
                   <th className="py-2.5 px-3">Player</th>
                   <th className="py-2.5 px-2">Position</th>
                   <th className="py-2.5 px-2 text-center font-mono-numbers">Age</th>
@@ -397,9 +617,30 @@ export const SquadView: React.FC<SquadViewProps> = ({
                 {filteredPlayers.map(p => {
                   const isStarting = Object.values(startingXV).includes(p.id);
                   const isBench = Object.values(bench).includes(p.id);
+                  const isSelected = selectedPlayerIds.includes(p.id);
 
                   return (
-                    <tr key={p.id} className="hover:bg-neutral-800/40 transition-colors">
+                    <tr
+                      key={p.id}
+                      onClick={() => {
+                        if (isBatchMode) toggleSelectPlayer(p.id);
+                      }}
+                      className={`transition-colors ${
+                        isSelected
+                          ? 'bg-amber-950/30 hover:bg-amber-950/50'
+                          : 'hover:bg-neutral-800/40'
+                      } ${isBatchMode ? 'cursor-pointer' : ''}`}
+                    >
+                      {isBatchMode && (
+                        <td className="py-2.5 px-3 text-center" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelectPlayer(p.id)}
+                            className="w-4 h-4 rounded accent-amber-500 cursor-pointer"
+                          />
+                        </td>
+                      )}
                       <td className="py-2.5 px-3 flex items-center space-x-2">
                         {isStarting && <span className="w-2 h-2 rounded-full bg-emerald-500" title="Starting XV" />}
                         {isBench && <span className="w-2 h-2 rounded-full bg-blue-500" title="Bench" />}
@@ -427,7 +668,7 @@ export const SquadView: React.FC<SquadViewProps> = ({
                       <td className="py-2.5 px-3 text-right font-mono-numbers text-neutral-200">
                         {formatMoney(p.marketValue, { compact: true })}
                       </td>
-                      <td className="py-2.5 px-2 text-center">
+                      <td className="py-2.5 px-2 text-center" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-center space-x-1.5">
                           <button
                             onClick={() => setSelectedPlayer(p)}
@@ -530,15 +771,17 @@ export const SquadView: React.FC<SquadViewProps> = ({
         </div>
       )}
 
-      {/* PLAYER EDITOR MODAL */}
+      {/* PLAYER EDITOR MODAL (Supports Save & Next Player down team list) */}
       {editingPlayer && (
         <PlayerEditorModal
           player={editingPlayer}
+          playerList={clubPlayers}
           onSave={(updated) => {
             careerManager.updatePlayer(updated);
             setEditingPlayer(null);
           }}
           onClose={() => setEditingPlayer(null)}
+          onSelectPlayer={(next) => setEditingPlayer(next)}
         />
       )}
 

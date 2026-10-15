@@ -20,24 +20,37 @@ import {
   Target,
   Sliders
 } from 'lucide-react';
+import { PlayerEditModal } from './PlayerEditModal';
+import { careerManager } from '../services/careerManager';
 
 interface PlayerProfileModalProps {
   player: Player | null;
   clubCountry?: string;
+  playerList?: Player[];
+  onSavePlayer?: (updated: Player) => void;
   onEdit?: (player: Player) => void;
   onClose: () => void;
 }
 
 export const PlayerProfileModal: React.FC<PlayerProfileModalProps> = ({
-  player,
+  player: initialPlayer,
   clubCountry,
+  playerList,
+  onSavePlayer,
   onEdit,
   onClose
 }) => {
   const { formatMoney } = useCurrency(clubCountry);
   const [activeTab, setActiveTab] = useState<'attributes' | 'stats' | 'injuries' | 'hybrid'>('attributes');
+  const [activePlayer, setActivePlayer] = useState<Player | null>(initialPlayer);
+  const [isEditing, setIsEditing] = useState<boolean>(false);
 
-  if (!player) return null;
+  React.useEffect(() => {
+    setActivePlayer(initialPlayer);
+  }, [initialPlayer]);
+
+  if (!activePlayer) return null;
+  const player = activePlayer;
 
   // Fallback career stats if not pre-seeded
   const careerStats = player.careerStats || {
@@ -140,16 +153,20 @@ export const PlayerProfileModal: React.FC<PlayerProfileModalProps> = ({
           </div>
 
           <div className="flex items-center space-x-2">
-            {onEdit && (
-              <button
-                onClick={() => onEdit(player)}
-                className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600 border border-emerald-500/50 text-emerald-300 hover:text-white text-xs font-heading font-bold flex items-center space-x-1.5 transition-all cursor-pointer shadow-sm"
-                title="Edit Player Name, Positions & Stats"
-              >
-                <Sliders className="w-3.5 h-3.5" />
-                <span>Edit Stats</span>
-              </button>
-            )}
+            <button
+              onClick={() => {
+                if (onEdit) {
+                  onEdit(player);
+                } else {
+                  setIsEditing(true);
+                }
+              }}
+              className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600 border border-emerald-500/50 text-emerald-300 hover:text-white text-xs font-heading font-bold flex items-center space-x-1.5 transition-all cursor-pointer shadow-sm"
+              title="Edit Player Name, Positions & Stats"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Edit Player</span>
+            </button>
             <button
               onClick={onClose}
               className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white cursor-pointer transition-colors"
@@ -542,6 +559,24 @@ export const PlayerProfileModal: React.FC<PlayerProfileModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Integrated PlayerEditModal */}
+      {isEditing && (
+        <PlayerEditModal
+          player={player}
+          playerList={playerList}
+          clubCountry={clubCountry}
+          onSave={(updated) => {
+            careerManager.updatePlayer(updated);
+            setActivePlayer(updated);
+            if (onSavePlayer) {
+              onSavePlayer(updated);
+            }
+          }}
+          onSelectPlayer={(next) => setActivePlayer(next)}
+          onClose={() => setIsEditing(false)}
+        />
+      )}
     </div>
   );
 };
