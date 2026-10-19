@@ -18,7 +18,7 @@ import { CoinStoreModal } from './components/CoinStoreModal';
 import { EditHubView } from './components/EditHubView';
 import { soundFx } from './services/soundFx';
 import { INITIAL_CLUBS } from './data/rugbyDatabase';
-import { Fixture } from './types/rugby';
+import { Fixture, TacticsConfig } from './types/rugby';
 import {
   LayoutDashboard,
   Users,
@@ -46,6 +46,8 @@ export function App() {
   const [isCoinStoreOpen, setIsCoinStoreOpen] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(soundFx.getMuted());
   const [quickMatchSetup, setQuickMatchSetup] = useState<{ homeClubId: string; awayClubId: string; userClubId: string } | null>(null);
+  const [quickMatchLineup, setQuickMatchLineup] = useState<{ startingXV: Record<number, string>; bench: Record<number, string> } | null>(null);
+  const [quickMatchTactics, setQuickMatchTactics] = useState<TacticsConfig | null>(null);
   const [isRegistryModalOpen, setIsRegistryModalOpen] = useState<boolean>(false);
 
   useEffect(() => {
@@ -65,8 +67,17 @@ export function App() {
     setCurrentScreen('career');
   };
 
-  const handleQuickMatch = (homeClubId: string, awayClubId: string, userClubId: string) => {
+  const handleQuickMatch = (
+    homeClubId: string,
+    awayClubId: string,
+    userClubId: string,
+    customLineup?: { startingXV: Record<number, string>; bench: Record<number, string> },
+    customTactics?: TacticsConfig
+  ) => {
     setQuickMatchSetup({ homeClubId, awayClubId, userClubId });
+    setQuickMatchLineup(customLineup || null);
+    setQuickMatchTactics(customTactics || null);
+
     const mockFixture: Fixture = {
       id: `quick_${Date.now()}`,
       round: 1,
@@ -81,6 +92,8 @@ export function App() {
 
   const handleOpenMatchday = (fixtureId: string) => {
     setQuickMatchSetup(null);
+    setQuickMatchLineup(null);
+    setQuickMatchTactics(null);
     setActiveMatchdayFixtureId(fixtureId);
     setCurrentScreen('matchday');
   };
@@ -90,6 +103,8 @@ export function App() {
       setCurrentScreen('title');
       setActiveMatchdayFixtureId(null);
       setQuickMatchSetup(null);
+      setQuickMatchLineup(null);
+      setQuickMatchTactics(null);
       return;
     }
 
@@ -99,6 +114,8 @@ export function App() {
     setCurrentScreen('career');
     setActiveMatchdayFixtureId(null);
     setQuickMatchSetup(null);
+    setQuickMatchLineup(null);
+    setQuickMatchTactics(null);
   };
 
   const handleToggleSound = () => {
@@ -171,6 +188,13 @@ export function App() {
 
   // Active Matchday Screen
   if (currentScreen === 'matchday' && activeFixture) {
+    const activeLineup = quickMatchSetup && quickMatchLineup
+      ? quickMatchLineup
+      : careerState.userLineup;
+    const activeTactics = quickMatchSetup && quickMatchTactics
+      ? quickMatchTactics
+      : careerState.userTactics;
+
     return (
       <div className="min-h-screen bg-neutral-950 text-neutral-100 p-3 sm:p-6 select-none max-w-7xl mx-auto">
         <MatchdayView
@@ -180,14 +204,16 @@ export function App() {
           homeSquad={homeSquad}
           awaySquad={awaySquad}
           userClubId={userClub.id}
-          userTactics={careerState.userTactics}
-          userLineup={careerState.userLineup}
+          userTactics={activeTactics}
+          userLineup={activeLineup}
           onFinishMatch={handleFinishMatch}
           onExit={() => {
             if (activeMatchdayFixtureId?.startsWith('quick_')) {
               setCurrentScreen('title');
               setActiveMatchdayFixtureId(null);
               setQuickMatchSetup(null);
+              setQuickMatchLineup(null);
+              setQuickMatchTactics(null);
             } else {
               setCurrentScreen('career');
             }

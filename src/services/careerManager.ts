@@ -1,7 +1,9 @@
 import { Club, Player, LeagueId, TacticsConfig, MatchSelection, LeagueTableRow, Fixture, InboxMessage, TransferOffer, ScoutingAssignment, StaffMember, RugbyPosition, FORWARD_POSITIONS, isFrontRow, PlayerAttributes } from '../types/rugby';
-import { INITIAL_CLUBS, generateClubSquad, generateFixturesForLeague, calculatePlayerOverall, POSITIONS_ORDER, getPositionShort } from '../data/rugbyDatabase';
+import { INITIAL_CLUBS, generateClubSquad, generateFixturesForLeague, calculatePlayerOverall, POSITIONS_ORDER, getPositionShort, getPositionName, JERSEY_TO_POSITION } from '../data/rugbyDatabase';
 import { getRivalry, calculateFanSatisfactionDelta } from '../data/rugbyRivalries';
 import { urcRegistry } from './urcRegistryService';
+import { checkPositionalEligibility, recalculatePlayerRating, recalculateBatchRatings, calculatePerformanceRating, deriveLastSeasonStats } from './playerRatingService';
+import { applyMatchPerformanceMorale, applyTeamResultMorale, applyWeeklyRotationMorale, initPlayerMoraleState } from './playerMoraleService';
 
 export interface CareerState {
   version: number;
@@ -27,6 +29,17 @@ export interface CareerState {
     focus: 'BALANCED' | 'SET_PIECE' | 'BREAKDOWN' | 'ATTACK_PATTERNS' | 'DEFENCE_FITNESS';
     intensity: 'LOW' | 'NORMAL' | 'HIGH';
   };
+  activeTargetedTraining?: ActiveTargetedTraining | null;
+}
+
+export interface ActiveTargetedTraining {
+  id: string;
+  focus: 'ATTACK' | 'DEFENCE' | 'SET_PIECE' | 'KICKING';
+  durationWeeks: number; // 1 to 3
+  weeksRemaining: number;
+  ratingBoost: number; // e.g. +0.8 or +1.4
+  costCoins: number;
+  startedWeek: number;
 }
 
 const STORAGE_KEY = 'rugga_27_urc_save_v1';
@@ -51,7 +64,7 @@ export class CareerManager {
     };
   }
 
-  private notify() {
+  public notify() {
     this.saveToStorage();
     this.subscribers.forEach(cb => cb({ ...this.state }));
   }
@@ -82,6 +95,21 @@ export class CareerManager {
       const clubSquad = generateClubSquad(c);
       players = players.concat(clubSquad);
     });
+
+    // Explicitly exclude departed Sharks players (Fassi, Am) per updated real-world roster
+    players = players.filter(p => {
+      const lower = p.name.toLowerCase().trim();
+      return !(
+        p.id === 'urc_p_153215' ||
+        p.id === 'urc_p_180559' ||
+        lower.includes('fassi') ||
+        lower.includes('lukhanyo am') ||
+        (p.clubId === 'sharks_urc' && lower === 'am')
+      );
+    });
+
+    // Calibrate all players' ratings going by current stats this season, last season stats, and potential
+    recalculateBatchRatings(players);
 
     // Generate fixtures and tables for URC exclusively
     let allFixtures: Fixture[] = [];
@@ -188,7 +216,8 @@ export class CareerManager {
       trainingSchedule: {
         focus: 'BALANCED',
         intensity: 'NORMAL'
-      }
+      },
+      activeTargetedTraining: null
     };
 
     this.notify();
@@ -273,6 +302,319 @@ export class CareerManager {
   public updateLineup(startingXV: Record<number, string>, bench: Record<number, string>) {
     this.state.userLineup = { startingXV, bench };
     this.notify();
+  }
+
+  /**
+   * Calculate player training efficiency (0 to 100%) based on fatigue and injury status
+   */
+  public calculateTrainingEfficiency(player: Player): number {
+    if (player.injury) return 0; // Injured players cannot train; efficiency is 0%
+    if (player.isRestedThisWeek) return 100; // Rested players perform light regenerative work
+
+    if (player.fatigue >= 85) return 15; // Severe burnout / exhaustion
+    if (player.fatigue >= 70) return 40; // Heavy fatigue
+    if (player.fatigue >= 50) return 70; // Noticeable fatigue
+    if (player.fatigue >= 35) return 88; // Moderate load
+    return 100; // Fresh & optimal
+  }
+
+  /**
+   * Toggle manager designation for individual player rest (skips contact drills for deep fatigue recovery)
+   */
+  public togglePlayerRest(playerId: string): { success: boolean; isRested: boolean; message: string } {
+    const p = this.state.players.find(x => x.id === playerId);
+    if (!p) return { success: false, isRested: false, message: 'Player not found' };
+
+    p.isRestedThisWeek = !p.isRestedThisWeek;
+    this.notify();
+    return {
+      success: true,
+      isRested: !!p.isRestedThisWeek,
+      message: p.isRestedThisWeek
+        ? `${p.name} placed on designated rest. Will recover extra fatigue and avoid training injury risk.`
+        : `${p.name} returned to standard training schedule.`
+    };
+  }
+
+  /**
+   * Return any players currently in userLineup who are sidelined with injury
+   */
+  public getInjuredLineupPlayers(clubId: string = this.state.userClubId): {
+    starting: { jersey: number; player: Player }[];
+    bench: { jersey: number; player: Player }[];
+  } {
+    const starting: { jersey: number; player: Player }[] = [];
+    const bench: { jersey: number; player: Player }[] = [];
+
+    Object.entries(this.state.userLineup.startingXV).forEach(([jerseyStr, pid]) => {
+      const p = this.state.players.find(x => x.id === pid && x.clubId === clubId);
+      if (p && p.injury) {
+        starting.push({ jersey: Number(jerseyStr), player: p });
+      }
+    });
+
+    Object.entries(this.state.userLineup.bench).forEach(([jerseyStr, pid]) => {
+      const p = this.state.players.find(x => x.id === pid && x.clubId === clubId);
+      if (p && p.injury) {
+        bench.push({ jersey: Number(jerseyStr), player: p });
+      }
+    });
+
+    return { starting, bench };
+  }
+
+  /**
+   * 1-Click Auto-Replace any injured players in the Starting XV and Bench with healthy, eligible squad members
+   */
+  public autoFixInjuredLineup(clubId: string = this.state.userClubId): {
+    replacedCount: number;
+    details: string[];
+  } {
+    const userPlayers = this.state.players.filter(p => p.clubId === clubId);
+    const currentPickedIds = new Set<string>([
+      ...Object.values(this.state.userLineup.startingXV),
+      ...Object.values(this.state.userLineup.bench)
+    ]);
+
+    const details: string[] = [];
+    let replacedCount = 0;
+
+    // 1. Fix starting XV
+    Object.entries(this.state.userLineup.startingXV).forEach(([jerseyStr, pid]) => {
+      const jersey = Number(jerseyStr);
+      const p = userPlayers.find(x => x.id === pid);
+      if (p && p.injury) {
+        currentPickedIds.delete(p.id);
+        const targetPos = JERSEY_TO_POSITION[jersey];
+
+        // Find healthiest, highest-rated healthy eligible player
+        const candidates = userPlayers
+          .filter(c => !c.injury && !currentPickedIds.has(c.id))
+          .filter(c => {
+            if (!targetPos) return true;
+            const el = checkPositionalEligibility(c, targetPos);
+            return el.eligible;
+          })
+          .sort((a, b) => {
+            const scoreA = a.overall + (100 - a.fatigue) * 0.2 + a.fitness * 0.2;
+            const scoreB = b.overall + (100 - b.fatigue) * 0.2 + b.fitness * 0.2;
+            return scoreB - scoreA;
+          });
+
+        if (candidates.length > 0) {
+          const replacement = candidates[0];
+          this.state.userLineup.startingXV[jersey] = replacement.id;
+          currentPickedIds.add(replacement.id);
+          replacedCount++;
+          details.push(`Replaced #${jersey} ${p.name} (${p.injury.name}) with ${replacement.name} (OVR ${replacement.overall})`);
+        }
+      }
+    });
+
+    // 2. Fix bench
+    Object.entries(this.state.userLineup.bench).forEach(([jerseyStr, pid]) => {
+      const jersey = Number(jerseyStr);
+      const p = userPlayers.find(x => x.id === pid);
+      if (p && p.injury) {
+        currentPickedIds.delete(p.id);
+
+        const candidates = userPlayers
+          .filter(c => !c.injury && !currentPickedIds.has(c.id))
+          .sort((a, b) => {
+            const scoreA = a.overall + (100 - a.fatigue) * 0.2 + a.fitness * 0.2;
+            const scoreB = b.overall + (100 - b.fatigue) * 0.2 + b.fitness * 0.2;
+            return scoreB - scoreA;
+          });
+
+        if (candidates.length > 0) {
+          const replacement = candidates[0];
+          this.state.userLineup.bench[jersey] = replacement.id;
+          currentPickedIds.add(replacement.id);
+          replacedCount++;
+          details.push(`Replaced Bench #${jersey} ${p.name} (${p.injury.name}) with ${replacement.name} (OVR ${replacement.overall})`);
+        }
+      }
+    });
+
+    if (replacedCount > 0) {
+      this.notify();
+    }
+
+    return { replacedCount, details };
+  }
+
+  /**
+   * Automatically assemble the optimal Starting XV and Bench
+   * based on player overall rating, primary/secondary position fit, current energy levels, and injury/suspension status.
+   */
+  public autoPickBestXV(clubId: string = this.state.userClubId): {
+    startingXV: Record<number, string>;
+    bench: Record<number, string>;
+  } {
+    const userPlayers = this.state.players.filter(p => p.clubId === clubId);
+    const healthyPlayers = userPlayers.filter(p => !p.injury);
+    const assignedIds = new Set<string>();
+
+    const newStartingXV: Record<number, string> = {};
+    const newBench: Record<number, string> = {};
+
+    // 1. Pick Starting XV (Jerseys 1 through 15)
+    for (let jersey = 1; jersey <= 15; jersey++) {
+      const targetPos = JERSEY_TO_POSITION[jersey];
+      const available = healthyPlayers.filter(p => !assignedIds.has(p.id));
+
+      const scored = available.map(p => {
+        const el = checkPositionalEligibility(p, targetPos);
+        const fitMultiplier = (p.fitness || 90) / 100;
+        const fatiguePenalty = (p.fatigue || 0) * 0.15;
+        const moraleBonus = (p.moraleState?.confidenceModifier || 0) * 1.5;
+
+        let positionFitScore = 0;
+        if (p.primaryPosition === targetPos) {
+          positionFitScore = 120;
+        } else if (p.secondaryPositions?.includes(targetPos)) {
+          positionFitScore = 80;
+        } else if (el.eligible) {
+          positionFitScore = 40;
+        } else {
+          positionFitScore = -50;
+        }
+
+        const score = (p.overall * 2.5) + positionFitScore + (fitMultiplier * 20) - fatiguePenalty + moraleBonus;
+        return { player: p, score, isPrimaryOrSecondary: p.primaryPosition === targetPos || !!p.secondaryPositions?.includes(targetPos) };
+      }).sort((a, b) => b.score - a.score);
+
+      const chosen = scored.find(c => c.isPrimaryOrSecondary) || scored[0];
+      if (chosen) {
+        newStartingXV[jersey] = chosen.player.id;
+        assignedIds.add(chosen.player.id);
+      }
+    }
+
+    // 2. Pick Bench (Jerseys 16 through 23)
+    const benchPositions: Record<number, RugbyPosition[]> = {
+      16: ['LH_PROP', 'TH_PROP'],
+      17: ['HOOKER'],
+      18: ['TH_PROP', 'LH_PROP'],
+      19: ['LOCK_4', 'LOCK_5'],
+      20: ['FLANKER_6', 'FLANKER_7', 'NO_8'],
+      21: ['SCRUM_HALF'],
+      22: ['FLY_HALF', 'INSIDE_CENTRE', 'OUTSIDE_CENTRE'],
+      23: ['FULLBACK', 'LEFT_WING', 'RIGHT_WING', 'OUTSIDE_CENTRE']
+    };
+
+    for (let jersey = 16; jersey <= 23; jersey++) {
+      const preferred = benchPositions[jersey] || [];
+      const available = healthyPlayers.filter(p => !assignedIds.has(p.id));
+
+      const scored = available.map(p => {
+        const matchesPrimary = preferred.includes(p.primaryPosition);
+        const matchesSecondary = (p.secondaryPositions || []).some(pos => preferred.includes(pos));
+        const fitMultiplier = (p.fitness || 90) / 100;
+        const fatiguePenalty = (p.fatigue || 0) * 0.15;
+        const posScore = matchesPrimary ? 100 : matchesSecondary ? 60 : 10;
+        const score = (p.overall * 2.0) + posScore + (fitMultiplier * 15) - fatiguePenalty;
+        return { player: p, score, matches: matchesPrimary || matchesSecondary };
+      }).sort((a, b) => b.score - a.score);
+
+      const chosen = scored.find(c => c.matches) || scored[0];
+      if (chosen) {
+        newBench[jersey] = chosen.player.id;
+        assignedIds.add(chosen.player.id);
+      }
+    }
+
+    this.state.userLineup = { startingXV: newStartingXV, bench: newBench };
+    this.notify();
+    return { startingXV: newStartingXV, bench: newBench };
+  }
+
+  public startTargetedTraining(focus: 'ATTACK' | 'DEFENCE' | 'SET_PIECE' | 'KICKING', durationWeeks: number): { success: boolean; message: string } {
+    if (this.state.activeTargetedTraining && this.state.activeTargetedTraining.weeksRemaining > 0) {
+      return { success: false, message: `A targeted ${this.state.activeTargetedTraining.focus} training block is already underway (${this.state.activeTargetedTraining.weeksRemaining} wk remaining).` };
+    }
+
+    const costCoins = durationWeeks * 40;
+    if (this.state.coins < costCoins) {
+      return { success: false, message: `Insufficient XP/Coins. Requires ${costCoins} coins for a ${durationWeeks}-week specialized block.` };
+    }
+
+    this.state.coins -= costCoins;
+    const ratingBoost = durationWeeks === 1 ? 0.8 : durationWeeks === 2 ? 1.4 : 2.0;
+
+    this.state.activeTargetedTraining = {
+      id: `tt_${Date.now()}`,
+      focus,
+      durationWeeks,
+      weeksRemaining: durationWeeks,
+      ratingBoost,
+      costCoins,
+      startedWeek: this.state.weekNumber
+    };
+
+    this.notify();
+    return {
+      success: true,
+      message: `Started ${durationWeeks}-week targeted ${focus} intensive training block (+${ratingBoost} rating boost upon completion)!`
+    };
+  }
+
+  public skipTargetedTrainingWithCoins(): { success: boolean; message: string } {
+    const active = this.state.activeTargetedTraining;
+    if (!active || active.weeksRemaining <= 0) {
+      return { success: false, message: 'No active targeted training block to fast-track.' };
+    }
+
+    const skipCost = active.weeksRemaining * 35;
+    if (this.state.coins < skipCost) {
+      return { success: false, message: `Insufficient coins to fast-track. Requires ${skipCost} coins.` };
+    }
+
+    this.state.coins -= skipCost;
+    return this.completeTargetedTraining(active);
+  }
+
+  public completeTargetedTraining(active: ActiveTargetedTraining): { success: boolean; message: string } {
+    const userPlayers = this.state.players.filter(p => p.clubId === this.state.userClubId);
+
+    userPlayers.forEach(p => {
+      if (p.attributes) {
+        if (active.focus === 'ATTACK') {
+          p.attributes.carrying = Math.min(99, p.attributes.carrying + Math.round(active.ratingBoost * 1.5));
+          p.attributes.offloading = Math.min(99, p.attributes.offloading + Math.round(active.ratingBoost * 1.2));
+          p.attributes.passing = Math.min(99, p.attributes.passing + Math.round(active.ratingBoost * 1.2));
+        } else if (active.focus === 'DEFENCE') {
+          p.attributes.tackling = Math.min(99, p.attributes.tackling + Math.round(active.ratingBoost * 1.5));
+          p.attributes.breakdown = Math.min(99, p.attributes.breakdown + Math.round(active.ratingBoost * 1.2));
+        } else if (active.focus === 'SET_PIECE') {
+          p.attributes.scrummaging = Math.min(99, p.attributes.scrummaging + Math.round(active.ratingBoost * 1.5));
+          p.attributes.lineout = Math.min(99, p.attributes.lineout + Math.round(active.ratingBoost * 1.2));
+          p.attributes.hooking = Math.min(99, p.attributes.hooking + Math.round(active.ratingBoost * 1.2));
+        } else if (active.focus === 'KICKING') {
+          p.attributes.kicking = Math.min(99, p.attributes.kicking + Math.round(active.ratingBoost * 1.8));
+        }
+      }
+      p.overall = Math.min(p.potential, Math.max(50, Math.round(p.overall + (active.ratingBoost * 0.7))));
+      recalculatePlayerRating(p);
+      urcRegistry.updatePlayer(p);
+    });
+
+    this.state.inbox.unshift({
+      id: `tt_complete_${Date.now()}`,
+      date: `Week ${this.state.weekNumber}`,
+      sender: 'Head of High Performance',
+      subject: `🏆 TRAINING COMPLETE: Targeted ${active.focus} Module (+${active.ratingBoost} Boost)`,
+      body: `High Performance Coaching Review:\n\nOur squad has successfully finalized the ${active.durationWeeks}-week intensive ${active.focus} training block!\n\n• Skill Focus: ${active.focus}\n• Direct Rating Boost: +${active.ratingBoost} average attribute progress\n• Squad Status: All active players gained tactical and technical improvements.\n\nKeep pushing the standards!`,
+      category: 'BOARD',
+      read: false
+    });
+
+    this.state.activeTargetedTraining = null;
+    this.notify();
+    return {
+      success: true,
+      message: `Targeted ${active.focus} block complete! Squad awarded +${active.ratingBoost} rating boosts.`
+    };
   }
 
   public updateTactics(tactics: Partial<TacticsConfig>) {
@@ -362,6 +704,9 @@ export class CareerManager {
         if (updates.morale !== undefined) p.morale = Math.max(1, Math.min(100, updates.morale));
         if (updates.form !== undefined) p.form = Math.max(1, Math.min(10, updates.form));
         if (updates.squadRole !== undefined) p.squadRole = updates.squadRole;
+        if ((updates as any).recalculateRatings) {
+          recalculatePlayerRating(p);
+        }
 
         urcRegistry.updatePlayer(p);
         count++;
@@ -372,6 +717,28 @@ export class CareerManager {
       this.notify();
     }
     return count;
+  }
+
+  /**
+   * Recalculates player ratings for a specific club going by their current stats this season,
+   * last season stats, and potential.
+   */
+  public recalculateClubRatings(clubId: string = this.state.userClubId) {
+    const clubPlayers = this.state.players.filter(p => p.clubId === clubId);
+    const result = recalculateBatchRatings(clubPlayers);
+    clubPlayers.forEach(p => urcRegistry.updatePlayer(p));
+    this.notify();
+    return result.summary;
+  }
+
+  /**
+   * Recalculates all player ratings across all clubs in the championship.
+   */
+  public recalculateAllPlayerRatings() {
+    const result = recalculateBatchRatings(this.state.players);
+    this.state.players.forEach(p => urcRegistry.updatePlayer(p));
+    this.notify();
+    return result.summary;
   }
 
   // --- Rugby Nations Standard Coin System ---
@@ -564,6 +931,24 @@ export class CareerManager {
           : (userWon ? 3 : isDraw ? 0 : -3);
         userClub.boardConfidence = Math.max(10, Math.min(100, userClub.boardConfidence + boardDelta));
 
+        // Team Results Morale Fluctuation across squad
+        const userSquad = this.state.players.filter(p => p.clubId === userClub.id);
+        const allStats = { ...result.homePlayerStats, ...result.awayPlayerStats };
+        const participatedPlayerIds = new Set<string>(Object.keys(allStats));
+
+        userSquad.forEach(p => {
+          applyTeamResultMorale(p, {
+            userWon,
+            isDraw,
+            scoreDiff: Math.abs(scoreDiff),
+            isRivalry,
+            participated: participatedPlayerIds.has(p.id),
+            roundNumber: this.state.currentRound
+          });
+          recalculatePlayerRating(p);
+          urcRegistry.updatePlayer(p);
+        });
+
         // Generate Inbox Message / Media Headline for the match
         if (isRivalry && activeRivalry) {
           const trophyNotice = activeRivalry.trophyName
@@ -726,6 +1111,7 @@ export class CareerManager {
   private updatePlayerStatsFromMatch(result: Fixture['result']) {
     if (!result) return;
     const allStats = { ...result.homePlayerStats, ...result.awayPlayerStats };
+    const participatedPlayerIds = new Set<string>(Object.keys(allStats));
 
     Object.keys(allStats).forEach(pid => {
       const matchStat = allStats[pid];
@@ -744,17 +1130,93 @@ export class CareerManager {
         // Moving average of rating
         p.stats.avgRating = Number(((p.stats.avgRating * (p.stats.matchesPlayed - 1) + matchStat.rating) / p.stats.matchesPlayed).toFixed(1));
 
-        // Morale and fatigue adjustments
-        p.fatigue = Math.min(100, p.fatigue + 25);
-        p.fitness = Math.max(50, p.fitness - 20);
-        if (matchStat.rating >= 7.5) p.morale = Math.min(100, p.morale + 5);
+        // Workload-based in-match fatigue calculation
+        const staminaEngine = (p.attributes?.fitness || 75) / 100;
+        const workActivity = (matchStat.tacklesMade * 0.9) + (matchStat.carries * 0.8) + (matchStat.metresCarried * 0.05);
+        const fatigueGain = Math.round(18 + (workActivity * (1.2 - staminaEngine * 0.4)));
+
+        p.fatigue = Math.min(100, p.fatigue + Math.max(14, Math.min(38, fatigueGain)));
+        p.fitness = Math.max(25, p.fitness - Math.round(fatigueGain * 0.65));
+
+        // Dynamic match performance morale fluctuation
+        applyMatchPerformanceMorale(p, matchStat, this.state.currentRound);
+
+        // Dynamically adjust player rating going by current stats this season, last season, and potential
+        recalculatePlayerRating(p);
+        urcRegistry.updatePlayer(p);
+
+        // In-Match Injury Check (elevated if player was playing with high fatigue > 60)
+        const fatigueMultiplier = p.fatigue > 75 ? 3.5 : p.fatigue > 60 ? 2.0 : 1.0;
+        const inMatchInjuryChance = 0.022 * fatigueMultiplier;
+
+        if (matchStat.injured || Math.random() < inMatchInjuryChance) {
+          if (!p.injury) {
+            const matchInjuries = [
+              { name: 'Hamstring Pull', type: 'Soft Tissue', weeks: 2, severity: 'MINOR' as const },
+              { name: 'Concussion (HIA Protocol)', type: 'HIA Protocol', weeks: 1, severity: 'MINOR' as const },
+              { name: 'Ankle Ligament Sprain', type: 'Ligament', weeks: 3, severity: 'MODERATE' as const },
+              { name: 'AC Joint Shoulder Separation', type: 'Joint Trauma', weeks: 4, severity: 'MODERATE' as const },
+              { name: 'MCL Knee Sprain', type: 'Ligament', weeks: 5, severity: 'SEVERE' as const },
+              { name: 'Dead Leg (Severe Contusion)', type: 'Hematoma', weeks: 1, severity: 'MINOR' as const }
+            ];
+            const chosenInj = matchInjuries[Math.floor(Math.random() * matchInjuries.length)];
+            p.injury = {
+              name: chosenInj.name,
+              weeksRemaining: chosenInj.weeks,
+              type: chosenInj.type,
+              severity: chosenInj.severity,
+              sustainedRound: this.state.currentRound,
+              sustainedWeek: this.state.weekNumber
+            };
+
+            if (!p.injuryHistory) p.injuryHistory = [];
+            p.injuryHistory.unshift({
+              id: `inj_match_${p.id}_${Date.now()}`,
+              name: chosenInj.name,
+              type: chosenInj.type,
+              sustainedDate: `URC Round ${this.state.currentRound} Matchday`,
+              durationWeeks: chosenInj.weeks,
+              severity: chosenInj.severity,
+              recovered: false,
+              notes: `Sustained during competitive live collision in Round ${this.state.currentRound}.`
+            });
+
+            if (p.clubId === this.state.userClubId) {
+              this.state.inbox.unshift({
+                id: `match_inj_${p.id}_${Date.now()}`,
+                date: `Round ${this.state.currentRound}`,
+                sender: 'Chief Medical Officer',
+                subject: `🚨 MATCH INJURY: ${p.name} (${chosenInj.name})`,
+                body: `Medical Update from the Matchday:\n\n${p.name} sustained a ${chosenInj.name} (${chosenInj.severity} severity) during the match.\n• Classification: ${chosenInj.type}\n• Estimated Absence: ${chosenInj.weeks} week${chosenInj.weeks > 1 ? 's' : ''}.\n• Availability: Sidelined from First Team selection until medically cleared.\n\nPlease adjust your starting XV and bench selections accordingly in Squad / Tactics.`,
+                category: 'INJURY',
+                read: false
+              });
+            }
+          }
+        }
       }
     });
+
+    // Unselected squad reserves begin early fatigue recovery
+    this.state.players
+      .filter(p => p.clubId === this.state.userClubId && !participatedPlayerIds.has(p.id))
+      .forEach(p => {
+        p.fatigue = Math.max(0, p.fatigue - 8);
+        p.fitness = Math.min(100, p.fitness + 6);
+      });
   }
 
   public advanceWeek() {
     this.state.weekNumber++;
     this.state.currentRound = Math.min(18, this.state.currentRound + 1);
+
+    // Progress Active Targeted Training
+    if (this.state.activeTargetedTraining && this.state.activeTargetedTraining.weeksRemaining > 0) {
+      this.state.activeTargetedTraining.weeksRemaining--;
+      if (this.state.activeTargetedTraining.weeksRemaining <= 0) {
+        this.completeTargetedTraining(this.state.activeTargetedTraining);
+      }
+    }
 
     const userClub = this.state.clubs.find(c => c.id === this.state.userClubId);
 
@@ -773,64 +1235,160 @@ export class CareerManager {
       userClub.transferBudget = Math.max(0, userClub.transferBudget + netCashflow);
     }
 
-    // 2. Training and Fatigue recovery
+    // 2. Training, Fatigue recovery, and Training Efficiency calculation
     const intensity = this.state.trainingSchedule.intensity;
-    const fatigueDrain = intensity === 'HIGH' ? 10 : intensity === 'NORMAL' ? 4 : 0;
+    const baseFatigueRecovery = intensity === 'LOW' ? 28 : intensity === 'NORMAL' ? 18 : 8;
+    const baseFitnessGain = intensity === 'LOW' ? 22 : intensity === 'NORMAL' ? 16 : 10;
     const attrGain = intensity === 'HIGH' ? 0.35 : intensity === 'NORMAL' ? 0.20 : 0.08;
 
-    this.state.players.forEach(p => {
-      // Recover fitness and reduce fatigue
-      p.fitness = Math.min(100, p.fitness + 18);
-      p.fatigue = Math.max(0, p.fatigue - 22 + fatigueDrain);
+    const medicalLevel = userClub?.facilities?.medical || 2;
+    const trainingLevel = userClub?.facilities?.training || 2;
+    const facilityBonus = 1 + (trainingLevel * 0.05); // 5% to 25% training bonus
 
-      // Young players develop toward potential
-      if (p.age < 26 && p.overall < p.potential && Math.random() < attrGain) {
-        p.overall = Math.min(p.potential, p.overall + 1);
+    this.state.players.forEach(p => {
+      // Calculate training efficiency based on fatigue and injury
+      p.trainingEfficiency = this.calculateTrainingEfficiency(p);
+
+      // Handle Individual Rest Assignment
+      if (p.isRestedThisWeek) {
+        p.fatigue = Math.max(0, p.fatigue - 40);
+        p.fitness = Math.min(100, p.fitness + 30);
+        p.isRestedThisWeek = false; // Reset for next week
+      } else {
+        // Standard training recovery based on workload
+        p.fatigue = Math.max(0, p.fatigue - baseFatigueRecovery);
+        p.fitness = Math.min(100, p.fitness + baseFitnessGain);
       }
 
-      // Progress injuries
+      // Young players develop toward potential - strictly scaled by Training Efficiency!
+      if (p.age < 26 && p.overall < p.potential && !p.injury) {
+        const efficiencyMultiplier = (p.trainingEfficiency || 100) / 100;
+        if (Math.random() < (attrGain * efficiencyMultiplier * facilityBonus)) {
+          p.overall = Math.min(p.potential, p.overall + 1);
+        }
+      }
+
+      // Rotation Status & Squad Role Morale Management
+      if (p.clubId === this.state.userClubId) {
+        const startingIds = new Set<string>(Object.values(this.state.userLineup?.startingXV || {}));
+        const benchIds = new Set<string>(Object.values(this.state.userLineup?.bench || {}));
+        const wasStarted = startingIds.has(p.id);
+        const wasBenched = benchIds.has(p.id);
+        const wasOmitted = !wasStarted && !wasBenched;
+
+        applyWeeklyRotationMorale(p, {
+          wasStarted,
+          wasBenched,
+          wasOmitted,
+          isInjured: !!p.injury,
+          isFatigued: (p.fatigue || 0) > 60,
+          isRested: !!p.isRestedThisWeek,
+          roundNumber: this.state.weekNumber
+        });
+
+        // If Key Player becomes severely discontent (<40 morale), send manager warning
+        if (p.squadRole === 'Key Player' && p.morale < 40 && wasOmitted && !p.injury) {
+          const alreadyNotified = this.state.inbox.some(m => m.id.startsWith(`morale_unhappy_${p.id}`));
+          if (!alreadyNotified) {
+            this.state.inbox.unshift({
+              id: `morale_unhappy_${p.id}_${Date.now()}`,
+              date: `Week ${this.state.weekNumber}`,
+              sender: `${p.name} (Player Representative)`,
+              subject: `⚠️ SQUAD DISSATISFACTION: ${p.name} demands more playing time`,
+              body: `Coach,\n\n${p.name} is deeply frustrated with his continued omission from the starting lineup. As a designated Key Player, he expected regular first-team rugby and feels his form is stalling on the sidelines.\n\nHis morale has dropped to ${p.morale}%, which is severely impairing his in-game confidence and performance ratings.\n\nWe urge you to restore him to the Starting XV for the next round.`,
+              category: 'BOARD',
+              read: false
+            });
+          }
+        }
+      }
+
+      // Dynamically recalculate player rating based on stats this season, last season, and potential
+      recalculatePlayerRating(p);
+      urcRegistry.updatePlayer(p);
+
+      // Progress existing injuries
       if (p.injury) {
-        p.injury.weeksRemaining--;
+        // Medical facility bonus: Level 4 or 5 accelerates recovery chance
+        const medicalSpeedup = (p.clubId === this.state.userClubId && medicalLevel >= 4 && Math.random() < 0.30) ? 2 : 1;
+        p.injury.weeksRemaining = Math.max(0, p.injury.weeksRemaining - medicalSpeedup);
+
         if (p.injury.weeksRemaining <= 0) {
-          this.state.inbox.unshift({
-            id: `inj_rec_${p.id}_${Date.now()}`,
-            date: `Week ${this.state.weekNumber}`,
-            sender: 'Head Physio',
-            subject: `${p.name} has returned to full training`,
-            body: `Medical staff have cleared ${p.name} after rehabilitation from his ${p.injury.name}. He is available for selection.`,
-            category: 'INJURY',
-            read: false
-          });
+          // Player fully recovered
+          if (p.injuryHistory) {
+            const activeRecord = p.injuryHistory.find(r => !r.recovered && r.name === p.injury?.name);
+            if (activeRecord) activeRecord.recovered = true;
+          }
+
+          if (p.clubId === this.state.userClubId) {
+            this.state.inbox.unshift({
+              id: `inj_rec_${p.id}_${Date.now()}`,
+              date: `Week ${this.state.weekNumber}`,
+              sender: 'Head Physio & Medical Staff',
+              subject: `✅ MEDICAL CLEARANCE: ${p.name} returns to full training`,
+              body: `Physiotherapy & Conditioning update:\n\n${p.name} has completed full rehabilitation following his ${p.injury.name}.\n• Status: 100% Fit & Medically Cleared\n• Availability: Returned to active selection for upcoming matchdays!\n\nWelcome back to the squad.`,
+              category: 'INJURY',
+              read: false
+            });
+          }
           p.injury = null;
         }
       }
     });
 
-    // 3. Random Injury check (higher if fatigue > 70)
-    if (Math.random() < 0.25) {
-      const uninjured = this.state.players.filter(p => p.clubId === this.state.userClubId && !p.injury);
-      if (uninjured.length > 0) {
-        const victim = uninjured[Math.floor(Math.random() * uninjured.length)];
-        const injuryTypes = [
-          { name: 'Hamstring Strain', weeks: 2 },
-          { name: 'Concussion (HIA Protocol)', weeks: 1 },
-          { name: 'AC Joint Shoulder Sprain', weeks: 3 },
-          { name: 'Ankle Ligament Twisting', weeks: 4 }
+    // 3. Training Contact Injury Check
+    // Risk depends on workload intensity, player fatigue, and medical facilities
+    const uninjuredUserPlayers = this.state.players.filter(p => p.clubId === this.state.userClubId && !p.injury && !p.isRestedThisWeek);
+
+    uninjuredUserPlayers.forEach(p => {
+      let riskPct = intensity === 'HIGH' ? 0.04 : intensity === 'NORMAL' ? 0.015 : 0.003;
+      if (p.fatigue > 75) riskPct *= 4.0; // Exhausted players risk breakdown
+      else if (p.fatigue > 60) riskPct *= 2.0;
+
+      // Medical facility mitigates risk
+      if (medicalLevel >= 4) riskPct *= 0.75;
+
+      if (Math.random() < riskPct) {
+        const trainingInjuries = [
+          { name: 'Hamstring Strain (Grade 1)', type: 'Soft Tissue', weeks: 2, severity: 'MINOR' as const },
+          { name: 'Concussion (HIA Protocol)', type: 'HIA Protocol', weeks: 1, severity: 'MINOR' as const },
+          { name: 'AC Joint Shoulder Contusion', type: 'Joint Sprain', weeks: 3, severity: 'MODERATE' as const },
+          { name: 'Ankle Ligament Twisting', type: 'Ligament', weeks: 3, severity: 'MODERATE' as const },
+          { name: 'Groin / Adductor Tear', type: 'Soft Tissue', weeks: 4, severity: 'MODERATE' as const }
         ];
-        const chosenInj = injuryTypes[Math.floor(Math.random() * injuryTypes.length)];
-        victim.injury = { name: chosenInj.name, weeksRemaining: chosenInj.weeks };
+        const chosenInj = trainingInjuries[Math.floor(Math.random() * trainingInjuries.length)];
+        p.injury = {
+          name: chosenInj.name,
+          weeksRemaining: chosenInj.weeks,
+          type: chosenInj.type,
+          severity: chosenInj.severity,
+          sustainedRound: this.state.currentRound,
+          sustainedWeek: this.state.weekNumber
+        };
+
+        if (!p.injuryHistory) p.injuryHistory = [];
+        p.injuryHistory.unshift({
+          id: `inj_train_${p.id}_${Date.now()}`,
+          name: chosenInj.name,
+          type: chosenInj.type,
+          sustainedDate: `Week ${this.state.weekNumber} Training Session`,
+          durationWeeks: chosenInj.weeks,
+          severity: chosenInj.severity,
+          recovered: false,
+          notes: `Sustained in high-intensity contact drills while fatigue was at ${p.fatigue}%.`
+        });
 
         this.state.inbox.unshift({
-          id: `inj_${victim.id}_${Date.now()}`,
+          id: `inj_${p.id}_${Date.now()}`,
           date: `Week ${this.state.weekNumber}`,
           sender: 'Medical Department',
-          subject: `Injury Report: ${victim.name}`,
-          body: `${victim.name} suffered a ${chosenInj.name} during training contact drills. Estimated recovery: ${chosenInj.weeks} weeks.`,
+          subject: `⚠️ TRAINING INJURY: ${p.name} (${chosenInj.name})`,
+          body: `Medical Incident Report:\n\n${p.name} sustained a ${chosenInj.name} during team contact training.\n• Severity: ${chosenInj.severity} (${chosenInj.type})\n• Player Fatigue at incident: ${p.fatigue}%\n• Estimated Absence: ${chosenInj.weeks} week${chosenInj.weeks > 1 ? 's' : ''}\n• Training Efficiency: Reduced to 0% during rehabilitation.\n\nHe has been placed on individual physiotherapy protocol.`,
           category: 'INJURY',
           read: false
         });
       }
-    }
+    });
 
     // 4. Scouting updates
     this.state.scoutingAssignments.forEach(scout => {
@@ -1323,6 +1881,75 @@ export class CareerManager {
               if (c.fanSatisfaction === undefined) c.fanSatisfaction = 82;
               if (!c.rivalryH2H) c.rivalryH2H = {};
             });
+          }
+          if (parsed.players) {
+            parsed.players = parsed.players.filter((p: Player) => {
+              const lower = p.name.toLowerCase().trim();
+              return !(
+                p.id === 'urc_p_153215' ||
+                p.id === 'urc_p_180559' ||
+                lower.includes('fassi') ||
+                lower.includes('lukhanyo am') ||
+                (p.clubId === 'sharks_urc' && lower === 'am')
+              );
+            });
+          }
+          if (parsed.userLineup) {
+            const validIds = new Set((parsed.players || []).map((p: Player) => p.id));
+            if (parsed.userLineup.startingXV) {
+              Object.keys(parsed.userLineup.startingXV).forEach(k => {
+                if (!validIds.has(parsed.userLineup.startingXV[Number(k)])) {
+                  delete parsed.userLineup.startingXV[Number(k)];
+                }
+              });
+            }
+            if (parsed.userLineup.bench) {
+              Object.keys(parsed.userLineup.bench).forEach(k => {
+                if (!validIds.has(parsed.userLineup.bench[Number(k)])) {
+                  delete parsed.userLineup.bench[Number(k)];
+                }
+              });
+            }
+
+            // Refill any slots that became empty due to departed players
+            if (parsed.players && parsed.userClubId) {
+              const userSquad = parsed.players.filter((p: Player) => p.clubId === parsed.userClubId);
+              const picked = new Set<string>([
+                ...Object.values(parsed.userLineup.startingXV || {}).map(String),
+                ...Object.values(parsed.userLineup.bench || {}).map(String)
+              ]);
+
+              parsed.userLineup.startingXV = parsed.userLineup.startingXV || {};
+              for (let j = 1; j <= 15; j++) {
+                if (!parsed.userLineup.startingXV[j]) {
+                  const targetPos = (JERSEY_TO_POSITION as any)[j];
+                  const available = userSquad.filter((p: Player) => !picked.has(p.id) && !p.injury);
+                  const positional = available.find((p: Player) => p.primaryPosition === targetPos || p.secondaryPositions?.includes(targetPos));
+                  const chosen = positional || available[0];
+                  if (chosen) {
+                    parsed.userLineup.startingXV[j] = chosen.id;
+                    picked.add(chosen.id);
+                  }
+                }
+              }
+
+              parsed.userLineup.bench = parsed.userLineup.bench || {};
+              for (let j = 16; j <= 23; j++) {
+                if (!parsed.userLineup.bench[j]) {
+                  const available = userSquad.filter((p: Player) => !picked.has(p.id) && !p.injury);
+                  const chosen = available[0];
+                  if (chosen) {
+                    parsed.userLineup.bench[j] = chosen.id;
+                    picked.add(chosen.id);
+                  }
+                }
+              }
+            }
+          }
+
+          // Ensure loaded players receive calibrated ratings going by current stats, last season stats, and potential
+          if (parsed.players && Array.isArray(parsed.players)) {
+            recalculateBatchRatings(parsed.players);
           }
         }
         return parsed;

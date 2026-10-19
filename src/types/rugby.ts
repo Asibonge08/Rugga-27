@@ -38,6 +38,82 @@ export interface PlayerCareerStats {
   motmAwards?: number;
 }
 
+export interface SeasonStats {
+  seasonId: string;            // e.g. '2024-25' or '2025-26'
+  seasonName: string;          // e.g. '2024–25 URC Regular & Finals'
+  matchesPlayed: number;
+  tries: number;
+  conversions: number;
+  penalties: number;
+  dropGoals: number;
+  points: number;
+  tacklesMade: number;
+  tacklesMissed: number;
+  turnoversWon: number;
+  metresCarried: number;
+  yellowCards: number;
+  redCards: number;
+  avgRating: number;
+}
+
+export type MoraleTier = 'ECSTATIC' | 'HIGH' | 'CONTENT' | 'DISCONTENT' | 'FRUSTRATED';
+
+export interface MoraleLogEntry {
+  category: 'PERFORMANCE' | 'ROTATION' | 'TEAM_RESULT' | 'REST' | 'ROLE_SATISFACTION';
+  title: string;
+  delta: number;
+  timestamp: string;
+}
+
+export interface PlayerMoraleState {
+  score: number;             // 0 to 100
+  tier: MoraleTier;
+  confidenceModifier: number;// -3 to +3 in-game rating effect
+  description: string;
+  recentLogs: MoraleLogEntry[];
+  consecutiveStarts: number;
+  consecutiveBenched: number;
+  consecutiveOmitted: number;
+}
+
+export type PenaltyDecisionOption = 'POSTS' | 'CORNER_LINEOUT' | 'SCRUM' | 'TAP_AND_GO';
+
+export interface PenaltyKickerCandidate {
+  playerId: string;
+  number: number;
+  name: string;
+  kickingAttr: number;
+  morale: number;
+  confidenceTier: MoraleTier;
+  successChance: number; // 0-100%
+}
+
+export interface PendingPenaltyDecision {
+  team: 'home' | 'away';
+  isUserTeam: boolean;
+  fieldX: number; // 0-100
+  fieldY: number; // 0-70
+  distanceToPostsMetres: number;
+  angleDescription: 'Central' | 'Slight Angle' | 'Acute Touchline Angle';
+  availableKickers: PenaltyKickerCandidate[];
+  defaultChoice: PenaltyDecisionOption;
+  recommendedChoice: PenaltyDecisionOption;
+  reason: string;
+}
+
+export interface RatingPerformanceBreakdown {
+  baseRating: number;
+  currentSeasonDelta: number;
+  lastSeasonDelta: number;
+  potentialFactor: number;
+  moraleFactor?: number;      // Morale & confidence impact (-3 to +3 OVR)
+  calculatedOverall: number;
+  previousOverall: number;
+  overallDelta: number;
+  statHighlights: string[];
+  recalculatedDate?: string;
+}
+
 export type SeasonId = '2025-26' | '2026-27';
 
 export const FORWARD_POSITIONS: RugbyPosition[] = [
@@ -114,7 +190,12 @@ export interface Player {
     name: string;
     weeksRemaining: number;
     type?: string;
+    severity?: 'MINOR' | 'MODERATE' | 'SEVERE';
+    sustainedRound?: number;
+    sustainedWeek?: number;
   } | null;
+  isRestedThisWeek?: boolean;
+  trainingEfficiency?: number; // 0-100% based on fatigue and injury
   sinBinMinutesRemaining?: number; // In-match tracking
   injuryHistory?: InjuryRecord[]; // Full career and seasonal injury history
   stats: {
@@ -132,8 +213,11 @@ export interface Player {
     redCards: number;
     avgRating: number;
   };
-  // Career Performance Statistics
+  // Seasonal and Historical Performance Statistics
+  lastSeasonStats?: SeasonStats;
   careerStats?: PlayerCareerStats;
+  ratingBreakdown?: RatingPerformanceBreakdown;
+  moraleState?: PlayerMoraleState;
   // Hybrid Versatility System
   hybridStatus?: HybridStatus;          // 'No' | 'Level 1' | 'Level 2' | 'Level 3'
   approvedPositions?: RugbyPosition[];  // Positions player is certified to play without prohibited penalty
@@ -345,6 +429,42 @@ export type DefensiveStyle = 'BLITZ_RUSH' | 'DRIFT' | 'BALANCED_LINE' | 'HEAVY_B
 export type PenaltyChoice = 'POSTS' | 'CORNER_LINEOUT' | 'SCRUM' | 'TAP_AND_GO';
 export type TempoStyle = 'HIGH_TEMPO' | 'CONTROLLED' | 'SLOW_ATTRITION';
 
+export type GamePlanPreset = 'DEFENSIVE' | 'NORMAL' | 'ATTACKING' | 'CUSTOM';
+export type StyleOfPlay = 'EXPANSIVE' | 'BALANCED' | 'TERRITORY' | 'FORWARDS';
+export type KickTendency = 'VERY_LOW' | 'LOW' | 'MEDIUM' | 'HIGH' | 'VERY_HIGH';
+export type RuckCommitment = 'CONSERVATIVE' | 'BALANCED' | 'HEAVY' | 'AGGRESSIVE';
+export type DefensiveLine = 'DEEP' | 'FLAT' | 'HIGH';
+export type PenaltyDecisionMode = 'PROMPT' | 'AUTO';
+
+export interface QueuedSubstitution {
+  id: string;
+  onPitchJersey: number;
+  offPlayerId: string;
+  offPlayerName: string;
+  offPosition: RugbyPosition;
+  onPlayerId: string;
+  onPlayerName: string;
+  onPlayerPosition: RugbyPosition;
+  isInjurySub?: boolean;
+}
+
+export interface LiveMatchInjuryEvent {
+  injuredPlayerId: string;
+  injuredPlayerName: string;
+  jerseyNumber: number;
+  injuryName: string;
+  severity: 'MINOR' | 'MODERATE' | 'SEVERE';
+  durationWeeks: number;
+  description: string;
+  recommendedSub?: {
+    playerId: string;
+    jerseyNumber: number;
+    name: string;
+    overall: number;
+    position: string;
+  };
+}
+
 export interface TacticsConfig {
   attackingStyle: AttackingStyle;
   defensiveStyle: DefensiveStyle;
@@ -354,6 +474,13 @@ export interface TacticsConfig {
   breakdownCommitment: 'LOW' | 'BALANCED' | 'AGGRESSIVE';
   primaryGoalKickerId?: string;
   captainId?: string;
+  // Extended tactical controls per Section 4 & 5
+  gamePlan?: GamePlanPreset;
+  styleOfPlay?: StyleOfPlay;
+  kickTendency?: KickTendency;
+  ruckCommitment?: RuckCommitment;
+  defensiveLine?: DefensiveLine;
+  penaltyDecisionMode?: PenaltyDecisionMode;
 }
 
 export interface MatchSelection {

@@ -6,8 +6,11 @@ import {
   FORWARD_POSITIONS,
   BACK_POSITIONS,
   getRugbyUnit,
-  isFrontRow
+  isFrontRow,
+  SeasonStats,
+  RatingPerformanceBreakdown
 } from '../types/rugby';
+import { initPlayerMoraleState } from './playerMoraleService';
 
 export interface PositionalEligibilityResult {
   eligible: boolean;
@@ -307,3 +310,371 @@ export function getRatingTier(rating: number): { label: string; color: string; b
   }
   return { label: 'Developing', color: 'text-neutral-400', badgeBg: 'bg-neutral-950 border-neutral-800' };
 }
+
+/**
+ * Derives or retrieves structured 2024–25 season statistics for a player.
+ * Anchors the player's multi-season track record, consistency, and veteran pedigree.
+ */
+export function deriveLastSeasonStats(player: Player): SeasonStats {
+  if (player.lastSeasonStats) {
+    return player.lastSeasonStats;
+  }
+
+  const isBack = BACK_POSITIONS.includes(player.primaryPosition);
+  const isKicker = player.primaryPosition === 'FLY_HALF' || player.primaryPosition === 'FULLBACK';
+  const age = player.age || 25;
+  const overall = player.overall || 78;
+
+  // Estimate last season appearances based on age, caliber & career caps
+  let lastSeasonMatches = 16;
+  if (age <= 21) {
+    lastSeasonMatches = 7 + Math.floor(Math.random() * 5); // Young player break-in
+  } else if (age >= 33) {
+    lastSeasonMatches = 11 + Math.floor(Math.random() * 6); // Managed veteran load
+  } else {
+    lastSeasonMatches = 15 + Math.floor(Math.random() * 7); // Prime starter (15-22 matches)
+  }
+
+  if (player.careerStats?.totalCaps && player.careerStats.totalCaps < lastSeasonMatches) {
+    lastSeasonMatches = Math.max(1, player.careerStats.totalCaps);
+  }
+
+  // Tries last season
+  let tries = 0;
+  if (player.primaryPosition.includes('WING')) {
+    tries = Math.round(lastSeasonMatches * (0.35 + (overall / 250)));
+  } else if (player.primaryPosition.includes('CENTRE') || player.primaryPosition === 'FULLBACK') {
+    tries = Math.round(lastSeasonMatches * (0.22 + (overall / 350)));
+  } else if (player.primaryPosition.includes('FLANKER') || player.primaryPosition === 'NUMBER_8') {
+    tries = Math.round(lastSeasonMatches * (0.16 + (overall / 400)));
+  } else if (player.primaryPosition === 'HOOKER') {
+    tries = Math.round(lastSeasonMatches * (0.14 + (overall / 450))); // Maul finishes
+  } else {
+    tries = Math.round(lastSeasonMatches * 0.05);
+  }
+
+  // Tackles last season
+  const tacklesPerMatch = isBack ? (overall >= 85 ? 7.2 : 5.4) : (overall >= 85 ? 11.5 : 9.0);
+  const tacklesMade = Math.round(lastSeasonMatches * tacklesPerMatch);
+  const tacklesMissed = Math.round(tacklesMade * 0.08);
+
+  // Turnovers won last season
+  const turnoversPerMatch = (!isBack && (player.primaryPosition.includes('FLANKER') || player.primaryPosition === 'HOOKER'))
+    ? 1.1
+    : !isBack ? 0.7 : 0.35;
+  const turnoversWon = Math.round(lastSeasonMatches * turnoversPerMatch);
+
+  // Metres carried last season
+  const metresPerMatch = isBack ? (overall * 0.6) : (overall * 0.35);
+  const metresCarried = Math.round(lastSeasonMatches * metresPerMatch);
+
+  // Kicking stats last season
+  let conversions = 0;
+  let penalties = 0;
+  let points = tries * 5;
+  if (isKicker && overall >= 78) {
+    conversions = Math.round(lastSeasonMatches * 2.2);
+    penalties = Math.round(lastSeasonMatches * 1.5);
+    points += (conversions * 2) + (penalties * 3);
+  }
+
+  // Last season average match rating (6.7 to 8.2 range)
+  const ratingBaseline = 6.6 + ((overall - 65) / 25) * 1.2;
+  const avgRating = Number(Math.max(6.2, Math.min(8.6, ratingBaseline)).toFixed(1));
+
+  return {
+    seasonId: '2024-25',
+    seasonName: '2024–25 Season Record',
+    matchesPlayed: lastSeasonMatches,
+    tries,
+    conversions,
+    penalties,
+    dropGoals: 0,
+    points,
+    tacklesMade,
+    tacklesMissed,
+    turnoversWon,
+    metresCarried,
+    yellowCards: overall >= 88 ? 0 : Math.floor(Math.random() * 2),
+    redCards: 0,
+    avgRating
+  };
+}
+
+/**
+ * Calculates a player's performance-based rating going by:
+ * 1. Current season stats (2025-26): Matches played, avg match rating, tries, tackles, turnovers, metres, cards.
+ * 2. Last season stats (2024-25): Established baseline pedigree, appearances, try rate, tackle volume, kicking accuracy.
+ * 3. Potential rating: The upward growth vector/ceiling, pulling young and developing talent upward when performing.
+ */
+export function calculatePerformanceRating(player: Player): {
+  overall: number;
+  attributes: PlayerAttributes;
+  breakdown: RatingPerformanceBreakdown;
+} {
+  const previousOverall = player.overall;
+  const baseRating = player.ratingBreakdown?.baseRating || player.overall;
+  const potential = player.potential || player.overall;
+  const age = player.age || 25;
+  const position = player.primaryPosition;
+  const isBack = BACK_POSITIONS.includes(position);
+  const isForward = FORWARD_POSITIONS.includes(position);
+
+  const currentStats = player.stats;
+  const lastSeason = deriveLastSeasonStats(player);
+
+  const highlights: string[] = [];
+
+  // ==========================================
+  // PILLAR 1: CURRENT SEASON STATS (2025–26)
+  // ==========================================
+  let currentSeasonScore = 0;
+
+  if (currentStats && currentStats.matchesPlayed > 0) {
+    const matches = currentStats.matchesPlayed;
+    const avgRating = currentStats.avgRating || 7.0;
+
+    // A. Match Rating Impact (Baseline is 7.0)
+    // Ratings >= 7.8 indicate world-class in-form displays
+    const ratingDiff = avgRating - 7.0;
+    const sampleConfidence = Math.min(1.0, matches / 4); // Full confidence after 4 matches
+    const matchRatingDelta = ratingDiff * 2.2 * sampleConfidence;
+    currentSeasonScore += matchRatingDelta;
+
+    if (avgRating >= 7.6 && matches >= 2) {
+      highlights.push(`Current Season: High-caliber ${avgRating} avg match rating across ${matches} games (+${matchRatingDelta.toFixed(1)} OVR)`);
+    } else if (avgRating < 6.4 && matches >= 2) {
+      highlights.push(`Current Season: Dipping match form with ${avgRating} avg rating (${matchRatingDelta.toFixed(1)} OVR)`);
+    }
+
+    // B. Try Scoring Output
+    const triesPerGame = currentStats.tries / matches;
+    if (isBack && triesPerGame >= 0.4) {
+      const tryBonus = Math.min(1.8, (triesPerGame - 0.2) * 2.0);
+      currentSeasonScore += tryBonus;
+      highlights.push(`Current Season: Strike weapon with ${currentStats.tries} tries in ${matches} matches (+${tryBonus.toFixed(1)} OVR)`);
+    } else if (isForward && currentStats.tries >= 2) {
+      const fwdTryBonus = Math.min(1.5, currentStats.tries * 0.5);
+      currentSeasonScore += fwdTryBonus;
+      highlights.push(`Current Season: Exceptional forward scoring with ${currentStats.tries} tries (+${fwdTryBonus.toFixed(1)} OVR)`);
+    }
+
+    // C. Defensive & Breakdown Workload
+    const tacklesPerGame = currentStats.tacklesMade / matches;
+    const turnoversPerGame = currentStats.turnoversWon / matches;
+
+    if (isForward) {
+      if (tacklesPerGame >= 9.5) {
+        const tackBonus = Math.min(1.5, (tacklesPerGame - 7.5) * 0.4);
+        currentSeasonScore += tackBonus;
+      }
+      if (turnoversPerGame >= 0.8) {
+        const toBonus = Math.min(1.6, turnoversPerGame * 0.9);
+        currentSeasonScore += toBonus;
+        highlights.push(`Current Season: Breakdown powerhouse with ${currentStats.turnoversWon} turnovers won (+${toBonus.toFixed(1)} OVR)`);
+      }
+    } else {
+      if (tacklesPerGame >= 6.0) {
+        currentSeasonScore += 0.8;
+      }
+    }
+
+    // D. Meters Carried
+    const metresPerGame = currentStats.metresCarried / matches;
+    if (metresPerGame >= 45) {
+      const carryBonus = Math.min(1.4, (metresPerGame - 30) * 0.03);
+      currentSeasonScore += carryBonus;
+    }
+
+    // E. Disciplinary Deductions
+    if (currentStats.yellowCards > 0) {
+      const yPenalty = currentStats.yellowCards * 0.4;
+      currentSeasonScore -= yPenalty;
+    }
+    if (currentStats.redCards > 0) {
+      const rPenalty = currentStats.redCards * 1.2;
+      currentSeasonScore -= rPenalty;
+      highlights.push(`Current Season: Disciplinary card penalties applied (-${rPenalty.toFixed(1)} OVR)`);
+    }
+  } else {
+    // Zero current matches played yet - form provides minor baseline momentum
+    const formFactor = ((player.form || 7) - 7) * 0.3;
+    currentSeasonScore += formFactor;
+    highlights.push(`Current Season: Pre-season form rating ${player.form || 7}/10 awaiting competitive minutes`);
+  }
+
+  // Bound current season delta between -4 and +4
+  const currentSeasonDelta = Number(Math.max(-4.0, Math.min(4.0, currentSeasonScore)).toFixed(1));
+
+  // ==========================================
+  // PILLAR 2: LAST SEASON STATS (2024–25)
+  // ==========================================
+  let lastSeasonScore = 0;
+
+  // A. Durability & Regular First-Team Exposure
+  if (lastSeason.matchesPlayed >= 16) {
+    lastSeasonScore += 0.8; // Proven starter endurance
+  } else if (lastSeason.matchesPlayed < 6 && age > 22) {
+    lastSeasonScore -= 0.6; // Lack of regular game-time last campaign
+  }
+
+  // B. Last Season Average Rating Anchor
+  const lastRatingDiff = (lastSeason.avgRating || 7.0) - 7.0;
+  lastSeasonScore += lastRatingDiff * 1.1;
+
+  // C. Last Season Try & Turnover Milestones
+  if (lastSeason.tries >= 7) {
+    lastSeasonScore += 0.9;
+    highlights.push(`Last Season: Prolific finisher with ${lastSeason.tries} tries in 2024-25 (+0.9 OVR)`);
+  }
+  if (lastSeason.turnoversWon >= 14) {
+    lastSeasonScore += 0.8;
+  }
+  if (lastSeason.tacklesMade >= 140) {
+    lastSeasonScore += 0.8;
+    highlights.push(`Last Season: Workhorse tackling engine with ${lastSeason.tacklesMade} completed tackles (+0.8 OVR)`);
+  }
+
+  // Bound last season delta between -2.5 and +3.0
+  const lastSeasonDelta = Number(Math.max(-2.5, Math.min(3.0, lastSeasonScore)).toFixed(1));
+
+  // ==========================================
+  // PILLAR 3: POTENTIAL FACTOR & GROWTH VECTOR
+  // ==========================================
+  let potentialFactorScore = 0;
+  const potentialGap = Math.max(0, potential - baseRating);
+
+  if (age <= 22) {
+    // Youth Prodigy (Accelerated development if performing well)
+    if (currentSeasonDelta >= -0.5) {
+      potentialFactorScore = Math.min(3.5, potentialGap * 0.22);
+      if (potentialFactorScore >= 1.5) {
+        highlights.push(`Potential Vector: High-ceiling prospect (POT ${potential}) developing rapidly (+${potentialFactorScore.toFixed(1)} OVR)`);
+      }
+    }
+  } else if (age <= 26) {
+    // Prime Development Window
+    if (currentSeasonDelta >= 0) {
+      potentialFactorScore = Math.min(2.5, potentialGap * 0.15);
+      if (potentialFactorScore >= 1.0) {
+        highlights.push(`Potential Vector: Entering athletic prime towards POT ${potential} (+${potentialFactorScore.toFixed(1)} OVR)`);
+      }
+    }
+  } else if (age >= 32) {
+    // Veteran Stabilization
+    potentialFactorScore = 0;
+  }
+
+  const potentialFactor = Number(potentialFactorScore.toFixed(1));
+
+  // ==========================================
+  // PILLAR 4: MORALE & IN-GAME CONFIDENCE
+  // ==========================================
+  const moraleState = initPlayerMoraleState(player);
+  const moraleFactor = Number(moraleState.confidenceModifier.toFixed(1));
+
+  if (moraleFactor >= 1.5) {
+    highlights.push(`Morale Factor: Peak confidence (${moraleState.score}%) boosting performance (+${moraleFactor.toFixed(1)} OVR)`);
+  } else if (moraleFactor <= -1.0) {
+    highlights.push(`Morale Factor: Lower morale (${moraleState.score}%) dampening form (${moraleFactor.toFixed(1)} OVR)`);
+  }
+
+  // ==========================================
+  // FINAL COMPUTED OVERALL & ATTRIBUTE SCALING
+  // ==========================================
+  const rawCalculated = baseRating + currentSeasonDelta + lastSeasonDelta + potentialFactor + moraleFactor;
+  // Bounded by [50, potential]
+  const calculatedOverall = Math.min(potential, Math.max(50, Math.round(rawCalculated)));
+  const overallDelta = calculatedOverall - previousOverall;
+
+  // Scale attributes to correspond with newly adjusted overall rating
+  const oldOverall = Math.max(40, previousOverall);
+  const scaleRatio = calculatedOverall / oldOverall;
+
+  const newAttributes: PlayerAttributes = { ...player.attributes };
+  for (const attrKey of Object.keys(newAttributes) as (keyof PlayerAttributes)[]) {
+    const originalVal = newAttributes[attrKey];
+    if (typeof originalVal === 'number') {
+      const adjusted = Math.round(originalVal * scaleRatio);
+      newAttributes[attrKey] = Math.min(99, Math.max(35, adjusted));
+    }
+  }
+
+  const breakdown: RatingPerformanceBreakdown = {
+    baseRating,
+    currentSeasonDelta,
+    lastSeasonDelta,
+    potentialFactor,
+    moraleFactor,
+    calculatedOverall,
+    previousOverall,
+    overallDelta,
+    statHighlights: highlights.slice(0, 4),
+    recalculatedDate: new Date().toISOString()
+  };
+
+  return {
+    overall: calculatedOverall,
+    attributes: newAttributes,
+    breakdown
+  };
+}
+
+/**
+ * Updates a single player in-place with newly calculated ratings from performance and potential.
+ */
+export function recalculatePlayerRating(player: Player): Player {
+  const result = calculatePerformanceRating(player);
+  
+  player.lastSeasonStats = deriveLastSeasonStats(player);
+  player.overall = result.overall;
+  player.attributes = result.attributes;
+  player.ratingBreakdown = result.breakdown;
+
+  // Recalculate market value and weekly wages with realistic rugby curve
+  player.marketValue = Math.round(Math.pow(player.overall / 10, 3.8) * 88);
+  player.weeklyWage = Math.round((player.marketValue / 100) * 1.55);
+
+  return player;
+}
+
+/**
+ * Batch recalculates ratings for a group of players (e.g. club squad or entire league).
+ */
+export function recalculateBatchRatings(players: Player[]): {
+  players: Player[];
+  summary: {
+    totalProcessed: number;
+    gainedRatingCount: number;
+    droppedRatingCount: number;
+    unchangedCount: number;
+    netRatingChange: number;
+  };
+} {
+  let gained = 0;
+  let dropped = 0;
+  let unchanged = 0;
+  let netChange = 0;
+
+  players.forEach(p => {
+    const prev = p.overall;
+    recalculatePlayerRating(p);
+    const diff = p.overall - prev;
+    netChange += diff;
+    if (diff > 0) gained++;
+    else if (diff < 0) dropped++;
+    else unchanged++;
+  });
+
+  return {
+    players,
+    summary: {
+      totalProcessed: players.length,
+      gainedRatingCount: gained,
+      droppedRatingCount: dropped,
+      unchangedCount: unchanged,
+      netRatingChange: netChange
+    }
+  };
+}
+

@@ -21,6 +21,7 @@ import {
 } from '../types/rugby';
 import rawUrcData from '../data/urcOfficialDatabase.json';
 import { INTERNATIONAL_RATINGS, calibratePlayerRating } from './urcScraper';
+import { recalculateBatchRatings, recalculatePlayerRating } from './playerRatingService';
 
 export interface OfficialClubInfo {
   id: string;                  // Stable internal club ID, e.g. 'stormers', 'bulls'
@@ -109,6 +110,19 @@ class UrcRegistryService {
     const cleanList: Player[] = [];
 
     for (const player of rawList) {
+      const lower = player.name.toLowerCase().trim();
+
+      // Exclude departed Sharks players per updated squad status: Fassi and Am do not play for the Sharks
+      if (
+        player.id === 'urc_p_153215' ||
+        player.id === 'urc_p_180559' ||
+        lower.includes('fassi') ||
+        lower.includes('lukhanyo am') ||
+        lower === 'am'
+      ) {
+        continue;
+      }
+
       if (player.clubId === 'sharks_urc' && player.name.toLowerCase().includes('lombard')) {
         if (foundSharksLombard) continue;
         foundSharksLombard = true;
@@ -116,7 +130,6 @@ class UrcRegistryService {
       }
 
       // Check calibrated rating
-      const lower = player.name.toLowerCase().trim();
       const intl = INTERNATIONAL_RATINGS[lower];
       if (intl) {
         player.overall = Math.max(player.overall, intl.overall);
@@ -137,17 +150,7 @@ class UrcRegistryService {
       }
 
       // Specific official URC positioning overrides
-      if (lower === 'aphelele fassi') {
-        player.primaryPosition = 'FULLBACK';
-        player.secondaryPositions = ['LEFT_WING'];
-        player.overall = Math.max(player.overall, 91);
-        player.potential = Math.max(player.potential, 93);
-      } else if (lower === 'lukhanyo am') {
-        player.primaryPosition = 'OUTSIDE_CENTRE';
-        player.secondaryPositions = ['INSIDE_CENTRE', 'RIGHT_WING'];
-        player.overall = Math.max(player.overall, 94);
-        player.potential = Math.max(player.potential, 95);
-      } else if (lower === 'grant williams') {
+      if (lower === 'grant williams') {
         player.primaryPosition = 'SCRUM_HALF';
         player.secondaryPositions = ['RIGHT_WING'];
         player.overall = Math.max(player.overall, 93);
@@ -157,8 +160,13 @@ class UrcRegistryService {
       cleanList.push(player);
     }
 
+    // Calibrate all verified players going by current stats, last season stats, and potential
+    recalculateBatchRatings(cleanList);
+
     this.players = cleanList;
-    this.registrations = (rawUrcData.registrations || []) as PlayerRegistration[];
+    this.registrations = ((rawUrcData.registrations || []) as PlayerRegistration[]).filter(
+      r => !r.playerName?.toLowerCase().includes('fassi') && !r.playerName?.toLowerCase().includes('lukhanyo am')
+    );
     this.audits = (rawUrcData.audits || []) as ClubRegistrationAudit[];
   }
 

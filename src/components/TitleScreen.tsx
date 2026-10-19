@@ -1,16 +1,24 @@
 import React, { useState } from 'react';
-import { Club, LeagueId } from '../types/rugby';
+import { Club, LeagueId, TacticsConfig } from '../types/rugby';
 import { LEAGUES, INITIAL_CLUBS } from '../data/rugbyDatabase';
 import { soundFx } from '../services/soundFx';
 import { useCurrency } from '../services/currencyService';
 import { CurrencySelector } from './CurrencySelector';
 import { getRivalry } from '../data/rugbyRivalries';
+import { careerManager } from '../services/careerManager';
+import { KickOffSquadModal } from './KickOffSquadModal';
 import { Play, Shield, Trophy, Users, Sparkles, ChevronRight, Volume2, VolumeX, Dices, Swords, X, Flame, Database, Sliders } from 'lucide-react';
 
 interface TitleScreenProps {
   onStartCareer: (clubId: string, managerName: string) => void;
   onResumeCareer?: () => void;
-  onQuickMatch: (homeClubId: string, awayClubId: string, userClubId: string) => void;
+  onQuickMatch: (
+    homeClubId: string,
+    awayClubId: string,
+    userClubId: string,
+    customLineup?: { startingXV: Record<number, string>; bench: Record<number, string> },
+    customTactics?: TacticsConfig
+  ) => void;
   hasExistingSave: boolean;
   onOpenRegistry?: () => void;
   onOpenEditHub?: () => void;
@@ -32,6 +40,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
 
   // Exhibition match state
   const [showExhibitionModal, setShowExhibitionModal] = useState<boolean>(false);
+  const [showKickOffSquadModal, setShowKickOffSquadModal] = useState<boolean>(false);
   const [exhibitionUserClubId, setExhibitionUserClubId] = useState<string>('stormers');
   const [exhibitionOpponentClubId, setExhibitionOpponentClubId] = useState<string>('bulls');
   const [isUserHome, setIsUserHome] = useState<boolean>(true);
@@ -535,14 +544,28 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               })()}
             </div>
 
-            {/* Launch Match Button */}
-            <div className="flex space-x-3">
+            {/* Launch Match Buttons */}
+            <div className="flex flex-col sm:flex-row gap-2.5">
               <button
                 onClick={() => setShowExhibitionModal(false)}
-                className="py-3 px-4 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-medium text-xs cursor-pointer"
+                className="py-2.5 px-3.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-medium text-xs cursor-pointer"
               >
                 Cancel
               </button>
+
+              <button
+                onClick={() => {
+                  soundFx.playClick();
+                  setShowExhibitionModal(false);
+                  setShowKickOffSquadModal(true);
+                }}
+                className="flex-1 py-2.5 px-3.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-heading font-bold text-xs tracking-wide flex items-center justify-center space-x-2 shadow-lg shadow-amber-950 transition-all cursor-pointer"
+                title="Select Starting XV, Bench and Match Tactics before Kick Off"
+              >
+                <Users className="w-4 h-4" />
+                <span>SELECT SQUAD & TACTICS</span>
+              </button>
+
               <button
                 onClick={() => {
                   soundFx.playWhistle('short');
@@ -551,14 +574,37 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   setShowExhibitionModal(false);
                   onQuickMatch(homeId, awayId, exhibitionUserClubId);
                 }}
-                className="flex-1 py-3 px-6 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-heading font-bold text-sm tracking-wide flex items-center justify-center space-x-2 shadow-lg shadow-emerald-950 transition-all cursor-pointer"
+                className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-heading font-black text-xs tracking-wide flex items-center justify-center space-x-1.5 shadow-lg shadow-emerald-950 transition-all cursor-pointer"
+                title="Quick Match with optimal lineup"
               >
-                <Play className="w-4 h-4 fill-current" />
-                <span>KICK OFF</span>
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>QUICK KICK OFF</span>
               </button>
             </div>
           </div>
         </div>
+      )}
+
+      {/* KICK OFF SQUAD SELECTION MODAL */}
+      {showKickOffSquadModal && (
+        <KickOffSquadModal
+          isOpen={showKickOffSquadModal}
+          onClose={() => setShowKickOffSquadModal(false)}
+          homeClub={isUserHome
+            ? INITIAL_CLUBS.find(c => c.id === exhibitionUserClubId) || INITIAL_CLUBS[0]
+            : INITIAL_CLUBS.find(c => c.id === exhibitionOpponentClubId) || INITIAL_CLUBS[1]}
+          awayClub={isUserHome
+            ? INITIAL_CLUBS.find(c => c.id === exhibitionOpponentClubId) || INITIAL_CLUBS[1]
+            : INITIAL_CLUBS.find(c => c.id === exhibitionUserClubId) || INITIAL_CLUBS[0]}
+          userClubId={exhibitionUserClubId}
+          allPlayers={careerManager.getState().players}
+          onStartMatch={(lineup, tactics) => {
+            setShowKickOffSquadModal(false);
+            const homeId = isUserHome ? exhibitionUserClubId : exhibitionOpponentClubId;
+            const awayId = isUserHome ? exhibitionOpponentClubId : exhibitionUserClubId;
+            onQuickMatch(homeId, awayId, exhibitionUserClubId, lineup, tactics);
+          }}
+        />
       )}
 
       {/* Flat Control Hint Line (Anti-AI Slop constitution requirement) */}

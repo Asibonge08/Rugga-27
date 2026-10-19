@@ -328,6 +328,24 @@ export const POSITIONS_ORDER: RugbyPosition[] = [
   'FULLBACK'          // 15
 ];
 
+export const JERSEY_TO_POSITION: Record<number, RugbyPosition> = {
+  1: 'LH_PROP',
+  2: 'HOOKER',
+  3: 'TH_PROP',
+  4: 'LOCK_4',
+  5: 'LOCK_5',
+  6: 'BLINDSIDE_FLANKER',
+  7: 'OPENSIDE_FLANKER',
+  8: 'NUMBER_8',
+  9: 'SCRUM_HALF',
+  10: 'FLY_HALF',
+  11: 'LEFT_WING',
+  12: 'INSIDE_CENTRE',
+  13: 'OUTSIDE_CENTRE',
+  14: 'RIGHT_WING',
+  15: 'FULLBACK'
+};
+
 export function getPositionNumber(pos: RugbyPosition): number {
   return POSITIONS_ORDER.indexOf(pos) + 1;
 }
@@ -428,7 +446,7 @@ export function generateClubSquad(club: Club): Player[] {
   const starDefinitions: Record<string, Partial<Player>[]> = {
     sharks_urc: [
       { name: 'Eben Etzebeth', primaryPosition: 'LOCK_4', secondaryPositions: ['LOCK_5'], nationality: 'South Africa', age: 32, potential: 97 },
-      { name: 'Lukhanyo Am', primaryPosition: 'OUTSIDE_CENTRE', secondaryPositions: ['INSIDE_CENTRE', 'RIGHT_WING'], nationality: 'South Africa', age: 30, potential: 94 },
+      { name: 'Ethan Hooker', primaryPosition: 'OUTSIDE_CENTRE', secondaryPositions: ['INSIDE_CENTRE', 'LEFT_WING'], nationality: 'South Africa', age: 21, potential: 92 },
       { name: 'Makazole Mapimpi', primaryPosition: 'LEFT_WING', secondaryPositions: ['RIGHT_WING'], nationality: 'South Africa', age: 33, potential: 91 },
       { name: 'Ox Nche', primaryPosition: 'LH_PROP', secondaryPositions: ['TH_PROP'], nationality: 'South Africa', age: 29, potential: 95 },
       { name: 'Bongi Mbonambi', primaryPosition: 'HOOKER', secondaryPositions: [], nationality: 'South Africa', age: 33, potential: 92 },
@@ -443,8 +461,8 @@ export function generateClubSquad(club: Club): Player[] {
         age: 30,
         potential: 93
       },
-      { name: 'Aphelele Fassi', primaryPosition: 'FULLBACK', secondaryPositions: ['LEFT_WING'], nationality: 'South Africa', age: 26, potential: 93 },
-      { name: 'Jordan Hendrikse', primaryPosition: 'FLY_HALF', secondaryPositions: ['FULLBACK', 'INSIDE_CENTRE'], nationality: 'South Africa', age: 23, potential: 89 },
+      { name: 'Eduan Keyter', primaryPosition: 'FULLBACK', secondaryPositions: ['LEFT_WING', 'RIGHT_WING'], nationality: 'South Africa', age: 28, potential: 88 },
+      { name: 'Jordan Hendrikse', primaryPosition: 'FLY_HALF', secondaryPositions: ['FULLBACK', 'INSIDE_CENTRE'], nationality: 'South Africa', age: 23, potential: 90 },
       { name: 'Vincent Koch', primaryPosition: 'TH_PROP', secondaryPositions: ['LH_PROP'], nationality: 'South Africa', age: 34, potential: 92 },
       { name: 'Phepsi Buthelezi', primaryPosition: 'NUMBER_8', secondaryPositions: ['BLINDSIDE_FLANKER'], nationality: 'South Africa', age: 25, potential: 88 },
       { name: 'Gianni Lombard', primaryPosition: 'FLY_HALF', secondaryPositions: ['FULLBACK'], nationality: 'South Africa', age: 26, potential: 87 }

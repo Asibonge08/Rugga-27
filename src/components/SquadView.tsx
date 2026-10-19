@@ -3,7 +3,7 @@ import { Player, RugbyPosition, isFrontRow, getRugbyUnit, FORWARD_POSITIONS, BAC
 import { POSITIONS_ORDER, getPositionName, getPositionShort } from '../data/rugbyDatabase';
 import { soundFx } from '../services/soundFx';
 import { useCurrency } from '../services/currencyService';
-import { checkPositionalEligibility, PositionalEligibilityResult } from '../services/playerRatingService';
+import { checkPositionalEligibility, PositionalEligibilityResult, recalculatePlayerRating, getRatingTier } from '../services/playerRatingService';
 import { PlayerEditorModal } from './PlayerEditorModal';
 import { careerManager } from '../services/careerManager';
 import {
@@ -23,7 +23,10 @@ import {
   Flame,
   Info,
   Sliders,
-  Edit3
+  Edit3,
+  Activity,
+  HeartPulse,
+  BatteryCharging
 } from 'lucide-react';
 
 const JERSEY_TO_POSITION: Record<number, RugbyPosition> = {
@@ -75,11 +78,18 @@ export const SquadView: React.FC<SquadViewProps> = ({
   const [isBatchMode, setIsBatchMode] = useState<boolean>(false);
   const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
   const [batchToast, setBatchToast] = useState<string | null>(null);
-  const [batchActionType, setBatchActionType] = useState<'fitness' | 'potential' | 'morale' | 'form' | 'role'>('fitness');
+  const [batchActionType, setBatchActionType] = useState<'fitness' | 'potential' | 'morale' | 'form' | 'role' | 'ratings'>('fitness');
   const [batchPotentialVal, setBatchPotentialVal] = useState<number>(85);
   const [batchRoleVal, setBatchRoleVal] = useState<Player['squadRole']>('First XV');
 
   const clubPlayers = players.filter(p => p.clubId === userClubId);
+
+  const handleRecalculateSquadRatings = () => {
+    soundFx.playWhistle('short');
+    const summary = careerManager.recalculateClubRatings(userClubId);
+    setBatchToast(`⚡ Recalculated Ratings: ${summary.gainedRatingCount} increased, ${summary.droppedRatingCount} dropped, net ${summary.netRatingChange >= 0 ? '+' : ''}${summary.netRatingChange} OVR across ${summary.totalProcessed} players`);
+    setTimeout(() => setBatchToast(null), 4500);
+  };
 
   const toggleSelectPlayer = (id: string) => {
     setSelectedPlayerIds(prev =>
@@ -123,9 +133,20 @@ export const SquadView: React.FC<SquadViewProps> = ({
     } else if (batchActionType === 'role') {
       count = careerManager.batchUpdatePlayers(selectedPlayerIds, { squadRole: batchRoleVal });
       setBatchToast(`✓ Set squad role to '${batchRoleVal}' for ${count} players`);
+    } else if (batchActionType === 'ratings') {
+      let recalcCount = 0;
+      selectedPlayerIds.forEach(id => {
+        const p = clubPlayers.find(x => x.id === id);
+        if (p) {
+          recalculatePlayerRating(p);
+          recalcCount++;
+        }
+      });
+      careerManager.notify();
+      setBatchToast(`⚡ Recalculated performance ratings for ${recalcCount} players from stats & potential`);
     }
 
-    setTimeout(() => setBatchToast(null), 3500);
+    setTimeout(() => setBatchToast(null), 4000);
   };
 
   // Formation coordinates on 2D visual board (x% from 0 to 100, y% from 0 to 100)
@@ -164,6 +185,15 @@ export const SquadView: React.FC<SquadViewProps> = ({
 
     const newPlayer = clubPlayers.find(p => p.id === newPlayerId);
     if (!newPlayer) return;
+
+    // Medical Injury Check: Injured players cannot be picked into Starting XV or Bench
+    if (newPlayer.injury) {
+      soundFx.playWhistle('short');
+      setIneligibleNotice(
+        `Medical Exclusion: ${newPlayer.name} is injured (${newPlayer.injury.name}, ${newPlayer.injury.weeksRemaining} wk${newPlayer.injury.weeksRemaining === 1 ? '' : 's'} remaining) and unavailable for matchday selection.`
+      );
+      return;
+    }
 
     // Strict Positional Eligibility Check for Starting XV (Jerseys 1 to 15)
     if (swapTargetJersey <= 15) {
@@ -213,14 +243,79 @@ export const SquadView: React.FC<SquadViewProps> = ({
     setIneligibleNotice(null);
   };
 
-  // Sort club players
-  const filteredPlayers = clubPlayers.filter(p =>
-    p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    p.primaryPosition.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'AVAILABLE' | 'INJURED' | 'FATIGUED'>('ALL');
+
+  const injuredInStartingXV = Object.entries(startingXV)
+    .map(([j, id]) => ({ jersey: Number(j), player: clubPlayers.find(p => p.id === id) }))
+    .filter((item): item is { jersey: number; player: Player } => !!(item.player && item.player.injury));
+
+  const injuredInBench = Object.entries(bench)
+    .map(([j, id]) => ({ jersey: Number(j), player: clubPlayers.find(p => p.id === id) }))
+    .filter((item): item is { jersey: number; player: Player } => !!(item.player && item.player.injury));
+
+  const totalInjuredInLineup = injuredInStartingXV.length + injuredInBench.length;
+
+  // Filter club players
+  const filteredPlayers = clubPlayers.filter(p => {
+    const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      p.primaryPosition.toLowerCase().includes(searchQuery.toLowerCase());
+    if (!matchesSearch) return false;
+
+    if (statusFilter === 'AVAILABLE') return !p.injury;
+    if (statusFilter === 'INJURED') return !!p.injury;
+    if (statusFilter === 'FATIGUED') return p.fatigue > 60;
+    return true;
+  });
 
   return (
     <div className="space-y-4 pb-12">
+      {/* Medical Alert Banner if injured players are in matchday squad */}
+      {totalInjuredInLineup > 0 && (
+        <div className="bg-red-950/90 border border-red-500/80 p-3.5 sm:p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xl animate-in fade-in">
+          <div className="flex items-start space-x-3">
+            <div className="w-9 h-9 rounded-xl bg-red-600/30 border border-red-500/50 flex items-center justify-center text-red-400 shrink-0">
+              <Activity className="w-5 h-5 animate-pulse" />
+            </div>
+            <div>
+              <span className="font-heading font-bold text-xs uppercase tracking-wider text-red-300 block">
+                🚨 Medical Alert: {totalInjuredInLineup} Sidelined Player{totalInjuredInLineup > 1 ? 's' : ''} in Matchday Squad
+              </span>
+              <p className="text-[11px] text-red-200 mt-0.5">
+                {[...injuredInStartingXV, ...injuredInBench].map(i => `#${i.jersey} ${i.player.name} (${i.player.injury?.name})`).join(', ')} cannot play.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                soundFx.playClick();
+                const res = careerManager.autoFixInjuredLineup(userClubId);
+                if (res.replacedCount > 0) {
+                  setBatchToast(`✓ Replaced ${res.replacedCount} injured player(s) with healthy reserves.`);
+                  setTimeout(() => setBatchToast(null), 4000);
+                }
+              }}
+              className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-heading font-bold text-xs tracking-wider cursor-pointer shadow-lg transition-all flex items-center justify-center space-x-1.5"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Replace Injured Players</span>
+            </button>
+            <button
+              onClick={() => {
+                soundFx.playClick();
+                careerManager.autoPickBestXV(userClubId);
+                setBatchToast('✓ Squad reset to optimal Auto-Pick selection based on ratings & fitness.');
+                setTimeout(() => setBatchToast(null), 4000);
+              }}
+              className="px-3.5 py-2 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-amber-300 border border-amber-500/40 font-heading font-bold text-xs tracking-wider cursor-pointer shadow-lg transition-all flex items-center justify-center space-x-1.5"
+            >
+              <Sparkles className="w-4 h-4 text-amber-400" />
+              <span>Reset to Auto-Pick</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top Bar: Selector & View Switcher */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-neutral-900 border border-neutral-800 p-4 rounded-2xl shadow-xl">
         <div className="flex items-center space-x-3">
@@ -234,6 +329,29 @@ export const SquadView: React.FC<SquadViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => {
+              soundFx.playClick();
+              careerManager.autoPickBestXV(userClubId);
+              setBatchToast('✓ Optimal Starting XV & Bench auto-picked based on ratings, position fit & fitness.');
+              setTimeout(() => setBatchToast(null), 4000);
+            }}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-950/90 hover:bg-emerald-800 text-emerald-300 hover:text-white border border-emerald-600/50 flex items-center space-x-1.5 cursor-pointer transition-all shadow-sm"
+            title="Auto-pick optimal starting XV and bench based on player ratings, position fit, and energy"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Reset to Auto-Pick</span>
+          </button>
+
+          <button
+            onClick={handleRecalculateSquadRatings}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-950/90 hover:bg-blue-800 text-blue-300 hover:text-white border border-blue-600/50 flex items-center space-x-1.5 cursor-pointer transition-all shadow-sm"
+            title="Recalculate squad ratings from current season stats, last season stats, and potential"
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span>Update Ratings from Stats</span>
+          </button>
+
           <button
             onClick={() => {
               soundFx.playClick();
@@ -365,6 +483,7 @@ export const SquadView: React.FC<SquadViewProps> = ({
                 <option value="morale">Max Out Morale (100%)</option>
                 <option value="form">Set Match Form to Sharp (8.0)</option>
                 <option value="role">Set Squad Contract Role</option>
+                <option value="ratings">Recalculate Ratings from Stats & Potential</option>
               </select>
             </div>
 
@@ -404,11 +523,12 @@ export const SquadView: React.FC<SquadViewProps> = ({
                 </div>
               )}
 
-              {(batchActionType === 'fitness' || batchActionType === 'morale' || batchActionType === 'form') && (
+              {(batchActionType === 'fitness' || batchActionType === 'morale' || batchActionType === 'form' || batchActionType === 'ratings') && (
                 <div className="text-xs text-neutral-400 bg-neutral-950/80 p-2.5 rounded-xl border border-neutral-800">
                   {batchActionType === 'fitness' && 'Will fully restore aerobic engine (100%) and clear all match fatigue across selected players.'}
                   {batchActionType === 'morale' && 'Will elevate team locker room confidence to maximum 100% contentment.'}
                   {batchActionType === 'form' && 'Sets competitive matchday form rating to 8.0/10 sharp.'}
+                  {batchActionType === 'ratings' && 'Will recalculate player overall ratings & attributes from current 2025–26 stats, last season 2024–25 baseline pedigree, and potential ceiling.'}
                 </div>
               )}
             </div>
@@ -458,22 +578,40 @@ export const SquadView: React.FC<SquadViewProps> = ({
                   className={`absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center cursor-pointer group transition-transform hover:scale-105 z-10`}
                 >
                   <div
-                    className={`w-9 h-9 sm:w-11 sm:h-11 rounded-full border-2 flex items-center justify-center font-heading font-black text-xs sm:text-sm text-white shadow-lg transition-all ${
+                    className={`w-9 h-9 sm:w-11 sm:h-11 rounded-full border-2 flex items-center justify-center font-heading font-black text-xs sm:text-sm text-white shadow-lg transition-all relative ${
                       isSelectedForSwap
                         ? 'border-yellow-400 bg-yellow-500/30 ring-4 ring-yellow-400/50 scale-110'
+                        : player?.injury
+                        ? 'border-red-500 bg-red-950/90 text-red-200 ring-2 ring-red-500/50'
                         : player
                         ? 'border-white/40 bg-emerald-700/90 hover:border-emerald-400'
                         : 'border-dashed border-neutral-600 bg-neutral-900/80 text-neutral-500'
                     }`}
                   >
                     {pos.jersey}
+                    {player?.injury && (
+                      <span className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-600 text-white font-bold text-[8px] flex items-center justify-center shadow animate-pulse" title={player.injury.name}>
+                        🚑
+                      </span>
+                    )}
                   </div>
-                  <div className="mt-1 px-1.5 py-0.5 rounded bg-neutral-950/90 border border-neutral-800 text-[9px] sm:text-[10px] font-semibold text-neutral-200 truncate max-w-[85px] sm:max-w-[105px] text-center shadow-md">
+                  <div className={`mt-1 px-1.5 py-0.5 rounded text-[9px] sm:text-[10px] font-semibold truncate max-w-[85px] sm:max-w-[105px] text-center shadow-md ${
+                    player?.injury ? 'bg-red-950/90 border border-red-700 text-red-200' : 'bg-neutral-950/90 border border-neutral-800 text-neutral-200'
+                  }`}>
                     {player ? player.name.split(' ').pop() : 'Empty'}
                   </div>
                   {player && (
-                    <div className="text-[8px] sm:text-[9px] font-mono-numbers text-emerald-400 font-bold">
-                      OVR {player.overall}
+                    <div className="flex items-center space-x-1 text-[8px] sm:text-[9px] font-mono-numbers">
+                      {player.injury ? (
+                        <span className="text-red-400 font-bold">Injured ({player.injury.weeksRemaining}w)</span>
+                      ) : (
+                        <>
+                          <span className="text-emerald-400 font-bold">OVR {player.overall}</span>
+                          <span className={`text-[7px] ${player.fatigue > 60 ? 'text-amber-400 font-bold' : 'text-neutral-500'}`}>
+                            · ⚡{player.fatigue}%
+                          </span>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -504,19 +642,30 @@ export const SquadView: React.FC<SquadViewProps> = ({
                       className={`flex items-center justify-between p-2 rounded-xl border text-xs cursor-pointer transition-all ${
                         isSelected
                           ? 'border-yellow-400 bg-yellow-500/20'
+                          : player?.injury
+                          ? 'border-red-800/80 bg-red-950/40 hover:border-red-700'
                           : 'border-neutral-800 bg-neutral-950/70 hover:border-neutral-700'
                       }`}
                     >
                       <div className="flex items-center space-x-2.5">
-                        <span className="w-5 h-5 rounded-full bg-neutral-800 text-emerald-400 font-bold flex items-center justify-center font-mono-numbers text-[10px]">
+                        <span className={`w-5 h-5 rounded-full font-bold flex items-center justify-center font-mono-numbers text-[10px] ${
+                          player?.injury ? 'bg-red-900 text-red-200' : 'bg-neutral-800 text-emerald-400'
+                        }`}>
                           {bJersey}
                         </span>
                         <div>
-                          <div className="font-medium text-neutral-200 truncate max-w-[130px]">
-                            {player ? player.name : 'Unassigned'}
+                          <div className="flex items-center space-x-1.5">
+                            <span className="font-medium text-neutral-200 truncate max-w-[110px]">
+                              {player ? player.name : 'Unassigned'}
+                            </span>
+                            {player?.injury && (
+                              <span className="text-[9px] px-1 rounded bg-red-950 text-red-300 border border-red-700">
+                                🚑 {player.injury.weeksRemaining}w
+                              </span>
+                            )}
                           </div>
                           <div className="text-[10px] text-neutral-400 font-mono-numbers">
-                            {player ? `${getPositionShort(player.primaryPosition)} · OVR ${player.overall}` : '-'}
+                            {player ? `${getPositionShort(player.primaryPosition)} · OVR ${player.overall} · ⚡Fatigue ${player.fatigue}%` : '-'}
                           </div>
                         </div>
                       </div>
@@ -567,19 +716,44 @@ export const SquadView: React.FC<SquadViewProps> = ({
       {/* SQUAD TABLE VIEW */}
       {viewMode === 'table' && (
         <div className="rounded-2xl bg-neutral-900 border border-neutral-800 shadow-xl overflow-hidden">
-          <div className="p-3 border-b border-neutral-800 flex items-center justify-between">
-            <div className="relative w-64">
-              <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
-              <input
-                type="text"
-                placeholder="Search squad..."
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-xs text-neutral-200 focus:outline-none focus:border-emerald-500"
-              />
+          <div className="p-3 border-b border-neutral-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative w-56 sm:w-64">
+                <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+                <input
+                  type="text"
+                  placeholder="Search squad..."
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-xs text-neutral-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              {/* Status Filters */}
+              <div className="flex items-center space-x-1 text-xs">
+                {[
+                  { id: 'ALL', label: 'All' },
+                  { id: 'AVAILABLE', label: 'Fit' },
+                  { id: 'INJURED', label: 'Injured' },
+                  { id: 'FATIGUED', label: 'Fatigued (>60%)' }
+                ].map(f => (
+                  <button
+                    key={f.id}
+                    onClick={() => setStatusFilter(f.id as any)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                      statusFilter === f.id
+                        ? 'bg-emerald-600 text-white font-semibold'
+                        : 'bg-neutral-800 text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
             </div>
+
             <span className="text-xs text-neutral-400 font-mono-numbers">
-              {filteredPlayers.length} Players Registered
+              {filteredPlayers.length} / {clubPlayers.length} Players
             </span>
           </div>
 
@@ -606,8 +780,10 @@ export const SquadView: React.FC<SquadViewProps> = ({
                   <th className="py-2.5 px-2 text-center font-mono-numbers">Age</th>
                   <th className="py-2.5 px-2 text-center font-mono-numbers">OVR</th>
                   <th className="py-2.5 px-2 text-center font-mono-numbers">POT</th>
-                  <th className="py-2.5 px-2 text-center font-mono-numbers">Fit</th>
-                  <th className="py-2.5 px-2 text-center font-mono-numbers">Morale</th>
+                  <th className="py-2.5 px-2 text-center font-mono-numbers">Fitness</th>
+                  <th className="py-2.5 px-2 text-center font-mono-numbers">Fatigue</th>
+                  <th className="py-2.5 px-2 text-center font-mono-numbers">Trn. Eff.</th>
+                  <th className="py-2.5 px-3 text-center">Medical Status</th>
                   <th className="py-2.5 px-3 text-right">Wage</th>
                   <th className="py-2.5 px-3 text-right">Value</th>
                   <th className="py-2.5 px-2 text-center">Action</th>
@@ -618,6 +794,7 @@ export const SquadView: React.FC<SquadViewProps> = ({
                   const isStarting = Object.values(startingXV).includes(p.id);
                   const isBench = Object.values(bench).includes(p.id);
                   const isSelected = selectedPlayerIds.includes(p.id);
+                  const eff = careerManager.calculateTrainingEfficiency(p);
 
                   return (
                     <tr
@@ -628,6 +805,8 @@ export const SquadView: React.FC<SquadViewProps> = ({
                       className={`transition-colors ${
                         isSelected
                           ? 'bg-amber-950/30 hover:bg-amber-950/50'
+                          : p.injury
+                          ? 'bg-red-950/20 hover:bg-red-950/30'
                           : 'hover:bg-neutral-800/40'
                       } ${isBatchMode ? 'cursor-pointer' : ''}`}
                     >
@@ -650,17 +829,69 @@ export const SquadView: React.FC<SquadViewProps> = ({
                         {getPositionShort(p.primaryPosition)}
                       </td>
                       <td className="py-2.5 px-2 text-center font-mono-numbers text-neutral-300">{p.age}</td>
-                      <td className="py-2.5 px-2 text-center font-mono-numbers text-emerald-400 font-bold">
-                        {p.overall}
+                      <td className="py-2.5 px-2 text-center font-mono-numbers">
+                        <div className="flex items-center justify-center space-x-1">
+                          <span className="text-emerald-400 font-bold">{p.overall}</span>
+                          {p.ratingBreakdown?.overallDelta !== undefined && p.ratingBreakdown.overallDelta !== 0 && (
+                            <span
+                              className={`text-[9px] px-1 rounded font-bold ${
+                                p.ratingBreakdown.overallDelta > 0
+                                  ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/50'
+                                  : 'bg-red-950/80 text-red-300 border border-red-700/50'
+                              }`}
+                              title={`${p.ratingBreakdown.overallDelta > 0 ? '+' : ''}${p.ratingBreakdown.overallDelta} from stats & potential`}
+                            >
+                              {p.ratingBreakdown.overallDelta > 0 ? `+${p.ratingBreakdown.overallDelta}` : p.ratingBreakdown.overallDelta}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-2.5 px-2 text-center font-mono-numbers text-amber-400 font-bold">
                         {p.potential}
                       </td>
-                      <td className="py-2.5 px-2 text-center font-mono-numbers text-neutral-300">
-                        {p.fitness}%
+                      <td className="py-2.5 px-2 text-center font-mono-numbers">
+                        <span className={p.fitness < 60 ? 'text-amber-400 font-bold' : 'text-neutral-300'}>
+                          {p.fitness}%
+                        </span>
                       </td>
-                      <td className="py-2.5 px-2 text-center font-mono-numbers text-neutral-300">
-                        {p.morale}%
+                      <td className="py-2.5 px-2 text-center font-mono-numbers">
+                        <span className={`px-1.5 py-0.5 rounded font-bold text-[10px] ${
+                          p.fatigue > 75
+                            ? 'bg-red-950 text-red-300 border border-red-800 animate-pulse'
+                            : p.fatigue > 55
+                            ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                            : 'text-neutral-300'
+                        }`}>
+                          {p.fatigue}%
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-2 text-center font-mono-numbers font-bold">
+                        <span className={p.injury ? 'text-red-400' : eff < 50 ? 'text-amber-400' : 'text-emerald-400'}>
+                          {eff}%
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-center">
+                        {p.injury ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full bg-red-950 text-red-300 border border-red-800 text-[10px] font-semibold whitespace-nowrap">
+                            🚑 {p.injury.name} ({p.injury.weeksRemaining}w)
+                          </span>
+                        ) : p.isRestedThisWeek ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full bg-blue-950 text-blue-300 border border-blue-800 text-[10px] font-semibold">
+                            🛌 Rested
+                          </span>
+                        ) : p.fatigue > 75 ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full bg-red-950 text-red-400 border border-red-800/60 text-[10px]">
+                            ⚠️ Exhausted
+                          </span>
+                        ) : p.fatigue > 55 ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full bg-amber-950 text-amber-300 border border-amber-800/60 text-[10px]">
+                            Tired
+                          </span>
+                        ) : (
+                          <span className="inline-block px-2 py-0.5 rounded-full bg-emerald-950/60 text-emerald-400 border border-emerald-900/40 text-[10px]">
+                            ✓ Fit
+                          </span>
+                        )}
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono-numbers text-neutral-300">
                         {formatMoney(p.weeklyWage, { perWeek: true })}
@@ -931,106 +1162,135 @@ export const SquadView: React.FC<SquadViewProps> = ({
                         penaltyPercent: 0
                       };
 
-                  return (
-                    <div
-                      key={player.id}
-                      className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
-                        isCurrentInThisJersey
-                          ? 'border-emerald-500/80 bg-emerald-950/30'
-                          : eligibility.eligible
-                          ? 'border-neutral-800 bg-neutral-950/70 hover:border-neutral-700'
-                          : 'border-red-950/40 bg-neutral-950/40 opacity-75'
-                      }`}
-                    >
-                      <div className="flex items-center space-x-3">
-                        <div
-                          className={`w-10 h-10 rounded-xl border flex items-center justify-center font-heading font-black text-sm shrink-0 ${
-                            eligibility.eligible
-                              ? 'border-emerald-500/40 bg-emerald-950/50 text-emerald-400'
-                              : 'border-red-500/30 bg-red-950/30 text-red-400'
-                          }`}
-                        >
-                          {eligibility.eligible ? eligibility.effectiveRating : player.overall}
-                        </div>
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <span className="font-heading font-bold text-sm text-neutral-100">{player.name}</span>
-                            {isCurrentInThisJersey && (
-                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
-                                Current
-                              </span>
-                            )}
+                    const isInjured = !!player.injury;
+                    return (
+                      <div
+                        key={player.id}
+                        className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
+                          isCurrentInThisJersey
+                            ? 'border-emerald-500/80 bg-emerald-950/30'
+                            : isInjured
+                            ? 'border-red-950/70 bg-red-950/20 opacity-80'
+                            : eligibility.eligible
+                            ? 'border-neutral-800 bg-neutral-950/70 hover:border-neutral-700'
+                            : 'border-red-950/40 bg-neutral-950/40 opacity-75'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-3">
+                          <div
+                            className={`w-10 h-10 rounded-xl border flex items-center justify-center font-heading font-black text-sm shrink-0 ${
+                              isInjured
+                                ? 'border-red-500/40 bg-red-950/50 text-red-400'
+                                : eligibility.eligible
+                                ? 'border-emerald-500/40 bg-emerald-950/50 text-emerald-400'
+                                : 'border-red-500/30 bg-red-950/30 text-red-400'
+                            }`}
+                          >
+                            {isInjured ? '🚑' : eligibility.eligible ? eligibility.effectiveRating : player.overall}
                           </div>
-                          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-400 mt-0.5">
-                            <span>Primary: {getPositionShort(player.primaryPosition)}</span>
-                            {player.secondaryPositions && player.secondaryPositions.length > 0 && (
-                              <span>· Also: {player.secondaryPositions.map(getPositionShort).join(', ')}</span>
-                            )}
-                            {player.hybridLevel && player.hybridLevel !== 'NONE' && (
-                              <span className="text-amber-400 font-semibold flex items-center space-x-0.5">
-                                <Sparkles className="w-2.5 h-2.5" />
-                                <span>Hybrid Star</span>
+                          <div>
+                            <div className="flex items-center space-x-2">
+                              <span className="font-heading font-bold text-sm text-neutral-100">{player.name}</span>
+                              {isInjured && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-red-950 text-red-300 border border-red-700 font-bold animate-pulse">
+                                  🚑 {player.injury?.name} ({player.injury?.weeksRemaining}w)
+                                </span>
+                              )}
+                              {isCurrentInThisJersey && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
+                                  Current
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-400 mt-0.5">
+                              <span>Primary: {getPositionShort(player.primaryPosition)}</span>
+                              {player.secondaryPositions && player.secondaryPositions.length > 0 && (
+                                <span>· Also: {player.secondaryPositions.map(getPositionShort).join(', ')}</span>
+                              )}
+                              <span className="font-mono-numbers">
+                                · Fitness: <strong className={player.fitness < 60 ? 'text-amber-400' : 'text-emerald-400'}>{player.fitness}%</strong>
                               </span>
-                            )}
+                              <span className="font-mono-numbers">
+                                · Fatigue: <strong className={player.fatigue > 60 ? 'text-red-400' : 'text-neutral-300'}>{player.fatigue}%</strong>
+                              </span>
+                              {player.hybridLevel && player.hybridLevel !== 'NONE' && (
+                                <span className="text-amber-400 font-semibold flex items-center space-x-0.5">
+                                  <Sparkles className="w-2.5 h-2.5" />
+                                  <span>Hybrid Star</span>
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      {/* Suitability Badge & Action Button */}
-                      <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
-                        {targetPos && (
-                          <div className="text-right">
-                            {eligibility.eligible ? (
-                              eligibility.isPrimary ? (
-                                <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
-                                  ✓ Primary Specialist
-                                </span>
-                              ) : eligibility.isHybrid ? (
-                                <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-medium">
-                                  ⭐ Approved Hybrid ({eligibility.penaltyPercent > 0 ? `-${eligibility.penaltyPercent}%` : 'Natural'})
-                                </span>
-                              ) : eligibility.isSecondary ? (
-                                <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 font-medium">
-                                  Approved Secondary (-4%)
-                                </span>
-                              ) : (
-                                <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-300 border border-yellow-500/30 font-medium">
-                                  ⚠️ Emergency Cover (-12%)
-                                </span>
-                              )
-                            ) : (
-                              <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-red-950/60 text-red-300 border border-red-800/40 font-medium">
-                                ⛔ Law Prohibited
+                        {/* Suitability Badge & Action Button */}
+                        <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
+                          {isInjured ? (
+                            <div className="text-right">
+                              <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-red-950 text-red-300 border border-red-700 font-medium">
+                                ⛔ Sidelined with Injury
                               </span>
-                            )}
-                            {eligibility.reason && !eligibility.eligible && (
                               <div className="text-[9px] text-red-400 mt-0.5 max-w-[200px] truncate sm:text-right">
-                                {eligibility.reason}
+                                {player.injury?.name} ({player.injury?.weeksRemaining} wks)
                               </div>
-                            )}
-                          </div>
-                        )}
+                            </div>
+                          ) : targetPos && (
+                            <div className="text-right">
+                              {eligibility.eligible ? (
+                                eligibility.isPrimary ? (
+                                  <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
+                                    ✓ Primary Specialist
+                                  </span>
+                                ) : eligibility.isHybrid ? (
+                                  <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-medium">
+                                    ⭐ Approved Hybrid ({eligibility.penaltyPercent > 0 ? `-${eligibility.penaltyPercent}%` : 'Natural'})
+                                  </span>
+                                ) : eligibility.isSecondary ? (
+                                  <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 font-medium">
+                                    Approved Secondary (-4%)
+                                  </span>
+                                ) : (
+                                  <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-300 border border-yellow-500/30 font-medium">
+                                    ⚠️ Emergency Cover (-12%)
+                                  </span>
+                                )
+                              ) : (
+                                <span className="inline-block text-[10px] px-2 py-0.5 rounded-full bg-red-950/60 text-red-300 border border-red-800/40 font-medium">
+                                  ⛔ Law Prohibited
+                                </span>
+                              )}
+                              {eligibility.reason && !eligibility.eligible && (
+                                <div className="text-[9px] text-red-400 mt-0.5 max-w-[200px] truncate sm:text-right">
+                                  {eligibility.reason}
+                                </div>
+                              )}
+                            </div>
+                          )}
 
-                        <button
-                          onClick={() => {
-                            if (eligibility.eligible) {
-                              handleExecuteSwap(player.id);
-                            } else {
-                              soundFx.playWhistle('short');
-                              setIneligibleNotice(eligibility.reason || 'World Rugby rules prohibit this position selection.');
-                            }
-                          }}
-                          className={`px-3 py-1.5 rounded-xl font-heading font-bold text-xs tracking-wide transition-all cursor-pointer ${
-                            eligibility.eligible
-                              ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md'
-                              : 'bg-neutral-800/60 hover:bg-neutral-800 text-neutral-400 border border-neutral-700/60'
-                          }`}
-                        >
-                          {eligibility.eligible ? `Pick #${swapTargetJersey}` : 'Ineligible'}
-                        </button>
+                          <button
+                            disabled={isInjured}
+                            onClick={() => {
+                              if (isInjured) return;
+                              if (eligibility.eligible) {
+                                handleExecuteSwap(player.id);
+                              } else {
+                                soundFx.playWhistle('short');
+                                setIneligibleNotice(eligibility.reason || 'World Rugby rules prohibit this position selection.');
+                              }
+                            }}
+                            className={`px-3 py-1.5 rounded-xl font-heading font-bold text-xs tracking-wide transition-all ${
+                              isInjured
+                                ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed border border-neutral-700/40'
+                                : eligibility.eligible
+                                ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md cursor-pointer'
+                                : 'bg-neutral-800/60 hover:bg-neutral-800 text-neutral-400 border border-neutral-700/60 cursor-pointer'
+                            }`}
+                          >
+                            {isInjured ? 'Sidelined' : eligibility.eligible ? `Pick #${swapTargetJersey}` : 'Ineligible'}
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  );
+                    );
                 });
               })()}
             </div>

@@ -1,5 +1,6 @@
 import React, { useRef, useEffect } from 'react';
 import { RugbyMatchEngine } from '../services/matchEngine';
+import { getPositionShort } from '../data/rugbyDatabase';
 
 interface MatchPitchCanvasProps {
   engine: RugbyMatchEngine | null;
@@ -219,14 +220,61 @@ export const MatchPitchCanvas: React.FC<MatchPitchCanvasProps> = ({ engine, onSe
         ctx.textBaseline = 'middle';
         ctx.fillText(String(p.number), px, py + 0.5);
 
+        // Sub glow slot transition halo
+        if (p.subGlowTimer && p.subGlowTimer > 0) {
+          ctx.save();
+          ctx.strokeStyle = '#10b981';
+          ctx.lineWidth = 2.5;
+          ctx.shadowColor = '#34d399';
+          ctx.shadowBlur = 8;
+          ctx.beginPath();
+          ctx.arc(px, py, playerRadius + 4.5, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // Struggling / Injury indicator
+        if (p.strugglingPlayingOn || p.isInjuredInMatch) {
+          ctx.fillStyle = '#ef4444';
+          ctx.beginPath();
+          ctx.arc(px + playerRadius - 1, py - playerRadius + 1, 4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 7px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('+', px + playerRadius - 1, py - playerRadius + 1);
+        }
+
+        // Energy / Fatigue meter under player
+        const isUserTeam = (p.team === 'home' && engine.homeClub.id === engine.userClubId) ||
+                           (p.team === 'away' && engine.awayClub.id === engine.userClubId);
+        if (isUserTeam || p.energy < 65) {
+          const barW = playerRadius * 1.8;
+          const barH = 2.5;
+          const barX = px - barW / 2;
+          const barY = py + playerRadius + 2.5;
+          const energyPct = Math.max(0, Math.min(1, p.energy / 100));
+
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+          ctx.fillRect(barX - 0.5, barY - 0.5, barW + 1, barH + 1);
+
+          ctx.fillStyle = energyPct > 0.65 ? '#10b981' : energyPct > 0.35 ? '#f59e0b' : '#ef4444';
+          ctx.fillRect(barX, barY, barW * energyPct, barH);
+        }
+
         // Player name tag for ball carrier or active players
         if (p.isCarrier || p.state === 'scrum' || p.state === 'kicking') {
+          const posShort = getPositionShort(p.primaryPosition);
+          const tagText = `${posShort} · ${p.name}`;
           ctx.font = `600 ${Math.max(9, width * 0.009)}px Inter, sans-serif`;
-          const textW = ctx.measureText(p.name).width;
-          ctx.fillStyle = 'rgba(15, 23, 20, 0.85)';
+          const textW = ctx.measureText(tagText).width;
+          ctx.fillStyle = 'rgba(15, 23, 20, 0.88)';
           ctx.fillRect(px - textW / 2 - 4, py - playerRadius - 14, textW + 8, 12);
           ctx.fillStyle = '#ffffff';
-          ctx.fillText(p.name, px, py - playerRadius - 8);
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(tagText, px, py - playerRadius - 8);
         }
       };
 

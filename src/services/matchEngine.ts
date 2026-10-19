@@ -1,6 +1,23 @@
-import { Club, Player, TacticsConfig, MatchEvent, InMatchPlayerStats, Fixture, Rivalry } from '../types/rugby';
+import {
+  Club,
+  Player,
+  TacticsConfig,
+  MatchEvent,
+  InMatchPlayerStats,
+  Fixture,
+  Rivalry,
+  PendingPenaltyDecision,
+  PenaltyDecisionOption,
+  PenaltyKickerCandidate,
+  MoraleTier,
+  QueuedSubstitution,
+  LiveMatchInjuryEvent,
+  RugbyPosition
+} from '../types/rugby';
 import { soundFx } from './soundFx';
 import { getRivalry } from '../data/rugbyRivalries';
+import { getMoraleTier, getConfidenceModifier } from './playerMoraleService';
+import { SubstitutionService } from './substitutionService';
 
 export interface VisualPlayer {
   id: string;
@@ -18,6 +35,18 @@ export interface VisualPlayer {
   state: 'idle' | 'running' | 'carrying' | 'tackling' | 'rucking' | 'scrum' | 'lineout' | 'kicking' | 'celebrating' | 'sin_bin';
   sinBinTimer?: number; // Match minutes
   stats: InMatchPlayerStats;
+  morale: number;
+  confidenceTier: MoraleTier;
+  confidenceModifier: number;
+  overall: number;
+  effectiveOverall: number;
+  kickingAttr: number;
+  energy: number; // 0-100%
+  primaryPosition: RugbyPosition;
+  secondaryPositions?: RugbyPosition[];
+  isInjuredInMatch?: boolean;
+  strugglingPlayingOn?: boolean;
+  subGlowTimer?: number;
 }
 
 export interface Ball {
@@ -71,11 +100,20 @@ export interface MatchEngineState {
   matchTension: number;        // 0 to 100 (Match tension scale)
   isRivalryMatch: boolean;
   activeRivalry: Rivalry | null;
+  pendingPenaltyDecision: PendingPenaltyDecision | null;
+  autoDecidePenalties: boolean;
+  queuedSubstitutions: QueuedSubstitution[];
+  substitutionsUsedCount: number;
+  pendingLiveInjury: LiveMatchInjuryEvent | null;
 }
 
 export class RugbyMatchEngine {
   public homeClub: Club;
   public awayClub: Club;
+  public userClubId?: string;
+  public homeSquad: Player[];
+  public awaySquad: Player[];
+  public chosenPenaltyKickerId: string | null = null;
   public homePlayers: VisualPlayer[] = [];
   public awayPlayers: VisualPlayer[] = [];
   public ball: Ball = { x: 50, y: 35, z: 0, vx: 0, vy: 0, vz: 0, carrierId: null, state: 'placed_for_kick' };
@@ -95,10 +133,14 @@ export class RugbyMatchEngine {
     homeTactics: TacticsConfig,
     awayTactics: TacticsConfig,
     homeLineup: Record<number, string>,
-    awayLineup: Record<number, string>
+    awayLineup: Record<number, string>,
+    userClubId?: string
   ) {
     this.homeClub = homeClub;
     this.awayClub = awayClub;
+    this.userClubId = userClubId;
+    this.homeSquad = homeSquad;
+    this.awaySquad = awaySquad;
     this.homeTactics = homeTactics;
     this.awayTactics = awayTactics;
 
@@ -138,7 +180,12 @@ export class RugbyMatchEngine {
       inHighlight: true,
       matchTension: initialTension,
       isRivalryMatch: isRivalry,
-      activeRivalry: activeRivalry || null
+      activeRivalry: activeRivalry || null,
+      pendingPenaltyDecision: null,
+      autoDecidePenalties: homeTactics.penaltyDecisionMode === 'AUTO' || awayTactics.penaltyDecisionMode === 'AUTO',
+      queuedSubstitutions: [],
+      substitutionsUsedCount: 0,
+      pendingLiveInjury: null
     };
 
     this.initializePlayers(homeSquad, awaySquad, homeLineup, awayLineup);
@@ -155,36 +202,58 @@ export class RugbyMatchEngine {
     this.awayPlayers = [];
 
     // Helper for visual player
-    const createVisual = (p: Player, num: number, team: 'home' | 'away'): VisualPlayer => ({
-      id: p.id,
-      name: p.name,
-      number: num,
-      team,
-      x: team === 'home' ? 40 : 60,
-      y: 35,
-      vx: 0,
-      vy: 0,
-      targetX: team === 'home' ? 40 : 60,
-      targetY: 35,
-      speed: 4.5 + (p.attributes.speed / 99) * 4.0,
-      isCarrier: false,
-      state: 'idle',
-      stats: {
-        playerId: p.id,
-        rating: 6.5,
-        tries: 0,
-        conversions: 0,
-        penalties: 0,
-        tacklesMade: 0,
-        tacklesMissed: 0,
-        turnoversWon: 0,
-        metresCarried: 0,
-        carries: 0,
-        yellowCard: false,
-        redCard: false,
-        injured: false
-      }
-    });
+    const createVisual = (p: Player, num: number, team: 'home' | 'away'): VisualPlayer => {
+      const moraleScore = typeof p.morale === 'number' ? Math.max(10, Math.min(100, p.morale)) : 80;
+      const confidenceTier = getMoraleTier(moraleScore);
+      const confidenceModifier = getConfidenceModifier(moraleScore);
+      const kickingAttr = p.attributes?.kicking || 70;
+      const baseOverall = p.overall || 78;
+      const effectiveOverall = Math.min(99, Math.max(50, Math.round(baseOverall + confidenceModifier)));
+      const confidenceSpeedBonus = confidenceModifier * 0.12;
+      const startingEnergy = Math.max(30, Math.min(100, p.fitness || 95));
+
+      return {
+        id: p.id,
+        name: p.name,
+        number: num,
+        team,
+        x: team === 'home' ? 40 : 60,
+        y: 35,
+        vx: 0,
+        vy: 0,
+        targetX: team === 'home' ? 40 : 60,
+        targetY: 35,
+        speed: Math.max(3.8, 4.5 + (p.attributes.speed / 99) * 4.0 + confidenceSpeedBonus),
+        isCarrier: false,
+        state: 'idle',
+        stats: {
+          playerId: p.id,
+          rating: 6.5,
+          tries: 0,
+          conversions: 0,
+          penalties: 0,
+          tacklesMade: 0,
+          tacklesMissed: 0,
+          turnoversWon: 0,
+          metresCarried: 0,
+          carries: 0,
+          yellowCard: false,
+          redCard: false,
+          injured: false
+        },
+        morale: moraleScore,
+        confidenceTier,
+        confidenceModifier,
+        overall: baseOverall,
+        effectiveOverall,
+        kickingAttr,
+        energy: startingEnergy,
+        primaryPosition: p.primaryPosition,
+        secondaryPositions: p.secondaryPositions,
+        isInjuredInMatch: false,
+        strugglingPlayingOn: false
+      };
+    };
 
     for (let num = 1; num <= 15; num++) {
       const hId = homeLineup[num];
@@ -198,6 +267,21 @@ export class RugbyMatchEngine {
       if (aPlayer) {
         this.awayPlayers.push(createVisual(aPlayer, num, 'away'));
       }
+    }
+
+    // Captain leadership boost (+1 rating to squad on field)
+    const homeCaptainOnPitch = this.homeTactics.captainId && this.homePlayers.some(p => p.id === this.homeTactics.captainId);
+    if (homeCaptainOnPitch) {
+      this.homePlayers.forEach(p => {
+        p.effectiveOverall = Math.min(99, p.effectiveOverall + 1);
+      });
+    }
+
+    const awayCaptainOnPitch = this.awayTactics.captainId && this.awayPlayers.some(p => p.id === this.awayTactics.captainId);
+    if (awayCaptainOnPitch) {
+      this.awayPlayers.forEach(p => {
+        p.effectiveOverall = Math.min(99, p.effectiveOverall + 1);
+      });
     }
   }
 
@@ -226,6 +310,233 @@ export class RugbyMatchEngine {
 
   public toggleHighlights(enabled: boolean) {
     this.state.highlightsOnly = enabled;
+  }
+
+  public isAtStoppage(): boolean {
+    const p = this.state.phase;
+    return this.state.isPaused ||
+      p === 'KICK_OFF' ||
+      p === 'LINEOUT' ||
+      p === 'SCRUM' ||
+      p === 'PENALTY_KICK' ||
+      p === 'CONVERSION' ||
+      p === 'TRY_SCORED' ||
+      p === 'HALF_TIME';
+  }
+
+  public queueSubstitution(
+    onPitchJersey: number,
+    benchPlayerId: string,
+    isInjurySub: boolean = false
+  ): { success: boolean; message: string; sub?: QueuedSubstitution } {
+    if (this.state.substitutionsUsedCount >= 8 && !isInjurySub) {
+      return { success: false, message: 'Maximum 8 tactical substitutions already used.' };
+    }
+
+    const isHome = this.homeClub.id === this.userClubId;
+    const players = isHome ? this.homePlayers : this.awayPlayers;
+    const squad = isHome ? this.homeSquad : this.awaySquad;
+
+    const onPitchPlayer = players.find(p => p.number === onPitchJersey);
+    const benchPlayer = squad.find(p => p.id === benchPlayerId);
+
+    if (!onPitchPlayer || !benchPlayer) {
+      return { success: false, message: 'Player selection invalid.' };
+    }
+
+    // Replace if already queued for this jersey
+    this.state.queuedSubstitutions = this.state.queuedSubstitutions.filter(
+      s => s.onPitchJersey !== onPitchJersey
+    );
+
+    const queuedSub: QueuedSubstitution = {
+      id: `sub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      onPitchJersey,
+      offPlayerId: onPitchPlayer.id,
+      offPlayerName: onPitchPlayer.name,
+      offPosition: onPitchPlayer.primaryPosition,
+      onPlayerId: benchPlayer.id,
+      onPlayerName: benchPlayer.name,
+      onPlayerPosition: benchPlayer.primaryPosition,
+      isInjurySub
+    };
+
+    // If currently at a stoppage or match paused, execute immediately!
+    if (this.isAtStoppage()) {
+      this.executeSingleSubstitution(queuedSub);
+      if (this.onUpdateCallback) this.onUpdateCallback(this);
+      return {
+        success: true,
+        message: `${queuedSub.onPlayerName} subbed on immediately for ${queuedSub.offPlayerName}!`,
+        sub: queuedSub
+      };
+    }
+
+    this.state.queuedSubstitutions.push(queuedSub);
+    this.addCommentary(`📋 Substitution queued: ${queuedSub.onPlayerName} for ${queuedSub.offPlayerName} – coming on at next stoppage.`);
+
+    if (this.onUpdateCallback) {
+      this.onUpdateCallback(this);
+    }
+
+    return {
+      success: true,
+      message: `${queuedSub.onPlayerName} for ${queuedSub.offPlayerName} coming on at next stoppage.`,
+      sub: queuedSub
+    };
+  }
+
+  public cancelQueuedSubstitution(subId: string): boolean {
+    const before = this.state.queuedSubstitutions.length;
+    this.state.queuedSubstitutions = this.state.queuedSubstitutions.filter(s => s.id !== subId);
+    if (this.onUpdateCallback) this.onUpdateCallback(this);
+    return this.state.queuedSubstitutions.length < before;
+  }
+
+  public applyPendingSubstitutions(): number {
+    if (this.state.queuedSubstitutions.length === 0) return 0;
+    const toApply = [...this.state.queuedSubstitutions];
+    this.state.queuedSubstitutions = [];
+    let count = 0;
+
+    toApply.forEach(sub => {
+      this.executeSingleSubstitution(sub);
+      count++;
+    });
+
+    if (this.onUpdateCallback) this.onUpdateCallback(this);
+    return count;
+  }
+
+  private executeSingleSubstitution(sub: QueuedSubstitution) {
+    const isHome = this.homeClub.id === this.userClubId;
+    const players = isHome ? this.homePlayers : this.awayPlayers;
+    const squad = isHome ? this.homeSquad : this.awaySquad;
+
+    const targetIdx = players.findIndex(p => p.number === sub.onPitchJersey);
+    const subPlayer = squad.find(p => p.id === sub.onPlayerId);
+
+    if (targetIdx !== -1 && subPlayer) {
+      const oldPlayer = players[targetIdx];
+      const moraleScore = subPlayer.morale ?? 80;
+      const confidenceTier = getMoraleTier(moraleScore);
+      const confidenceModifier = getConfidenceModifier(moraleScore);
+      const kickingAttr = subPlayer.attributes?.kicking || 70;
+      const baseOverall = subPlayer.overall || 78;
+
+      players[targetIdx] = {
+        id: subPlayer.id,
+        name: subPlayer.name,
+        number: sub.onPitchJersey,
+        team: isHome ? 'home' : 'away',
+        x: oldPlayer.x,
+        y: oldPlayer.y,
+        vx: 0,
+        vy: 0,
+        targetX: oldPlayer.targetX,
+        targetY: oldPlayer.targetY,
+        speed: 4.5 + (subPlayer.attributes.speed / 99) * 4.0,
+        isCarrier: false,
+        state: 'idle',
+        stats: {
+          playerId: subPlayer.id,
+          rating: 6.6,
+          tries: 0,
+          conversions: 0,
+          penalties: 0,
+          tacklesMade: 0,
+          tacklesMissed: 0,
+          turnoversWon: 0,
+          metresCarried: 0,
+          carries: 0,
+          yellowCard: false,
+          redCard: false,
+          injured: false
+        },
+        morale: moraleScore,
+        confidenceTier,
+        confidenceModifier,
+        overall: baseOverall,
+        effectiveOverall: Math.min(99, Math.max(50, Math.round(baseOverall + confidenceModifier))),
+        kickingAttr,
+        energy: Math.max(75, Math.min(100, subPlayer.fitness || 95)),
+        primaryPosition: subPlayer.primaryPosition,
+        secondaryPositions: subPlayer.secondaryPositions,
+        isInjuredInMatch: false,
+        strugglingPlayingOn: false,
+        subGlowTimer: 3.5
+      };
+
+      this.state.substitutionsUsedCount++;
+      soundFx.playWhistle('short');
+      this.addEvent(
+        'SUBSTITUTION',
+        `🔄 SUBSTITUTION (${this.state.substitutionsUsedCount}/8): ${sub.onPlayerName} replaces ${oldPlayer.name} at #${sub.onPitchJersey}!`,
+        isHome ? this.homeClub.id : this.awayClub.id,
+        sub.onPlayerId
+      );
+      this.addCommentary(`Fresh legs! ${sub.onPlayerName} comes on to replace ${oldPlayer.name}.`);
+    }
+  }
+
+  public resolveLiveInjuryDecision(
+    choice: 'SUB_RECOMMENDED' | 'SUB_BENCH' | 'PLAY_ON',
+    customBenchPlayerId?: string
+  ) {
+    const inj = this.state.pendingLiveInjury;
+    if (!inj) return;
+
+    this.state.pendingLiveInjury = null;
+    const isHome = this.homeClub.id === this.userClubId;
+    const players = isHome ? this.homePlayers : this.awayPlayers;
+    const injuredPlayer = players.find(p => p.id === inj.injuredPlayerId);
+
+    if (choice === 'SUB_RECOMMENDED' && inj.recommendedSub) {
+      this.executeSingleSubstitution({
+        id: `inj_sub_${Date.now()}`,
+        onPitchJersey: inj.jerseyNumber,
+        offPlayerId: inj.injuredPlayerId,
+        offPlayerName: inj.injuredPlayerName,
+        offPosition: injuredPlayer?.primaryPosition || 'LOCK_4',
+        onPlayerId: inj.recommendedSub.playerId,
+        onPlayerName: inj.recommendedSub.name,
+        onPlayerPosition: inj.recommendedSub.position as any,
+        isInjurySub: true
+      });
+      this.play();
+    } else if (choice === 'SUB_BENCH' && customBenchPlayerId) {
+      const squad = isHome ? this.homeSquad : this.awaySquad;
+      const subPlayer = squad.find(p => p.id === customBenchPlayerId);
+      if (subPlayer) {
+        this.executeSingleSubstitution({
+          id: `inj_sub_${Date.now()}`,
+          onPitchJersey: inj.jerseyNumber,
+          offPlayerId: inj.injuredPlayerId,
+          offPlayerName: inj.injuredPlayerName,
+          offPosition: injuredPlayer?.primaryPosition || 'LOCK_4',
+          onPlayerId: subPlayer.id,
+          onPlayerName: subPlayer.name,
+          onPlayerPosition: subPlayer.primaryPosition,
+          isInjurySub: true
+        });
+      }
+      this.play();
+    } else {
+      // PLAY_ON
+      if (injuredPlayer) {
+        injuredPlayer.strugglingPlayingOn = true;
+        injuredPlayer.energy = Math.max(20, injuredPlayer.energy - 35);
+        injuredPlayer.speed = Math.max(3.2, injuredPlayer.speed * 0.72);
+        this.addCommentary(`⚠️ ${injuredPlayer.name} is struggling... plays on at less than his best.`);
+        this.addEvent(
+          'INJURY',
+          `Medical warning: ${injuredPlayer.name} is struggling with ${inj.injuryName} but remains on field at reduced effectiveness.`,
+          isHome ? this.homeClub.id : this.awayClub.id,
+          injuredPlayer.id
+        );
+      }
+      this.play();
+    }
   }
 
   private loop = (timestamp: number) => {
@@ -278,6 +589,7 @@ export class RugbyMatchEngine {
   }
 
   public setupKickoff(team: 'home' | 'away') {
+    this.applyPendingSubstitutions();
     this.state.phase = 'KICK_OFF';
     this.state.possessionTeam = team;
     this.state.phaseTimer = 2.0;
@@ -382,6 +694,12 @@ export class RugbyMatchEngine {
           p.sinBinTimer = undefined;
           p.state = 'idle';
           this.addCommentary(`${p.name} returns to the pitch after serving 10 minutes in the sin bin.`);
+        }
+      }
+      if (p.subGlowTimer && p.subGlowTimer > 0) {
+        p.subGlowTimer -= dt;
+        if (p.subGlowTimer <= 0) {
+          p.subGlowTimer = undefined;
         }
       }
     });
@@ -756,6 +1074,16 @@ export class RugbyMatchEngine {
       return;
     }
 
+    // Collision Injury Check (low probability, elevated if player has low energy < 45%)
+    const injuryCandidate = Math.random() < 0.5 ? carrier : tackler;
+    const isFatigued = (injuryCandidate.energy || 100) < 45;
+    const injuryChance = isFatigued ? 0.035 : 0.012;
+
+    if (Math.random() < injuryChance && !injuryCandidate.isInjuredInMatch && !this.state.pendingLiveInjury) {
+      this.triggerLiveMatchInjury(injuryCandidate);
+      return;
+    }
+
     // Form Ruck
     carrier.state = 'rucking';
     tackler.state = 'rucking';
@@ -778,6 +1106,82 @@ export class RugbyMatchEngine {
       f.targetY = carrier.y + (Math.random() * 2 - 1);
       f.state = 'rucking';
     });
+  }
+
+  private triggerLiveMatchInjury(player: VisualPlayer) {
+    const isHome = player.team === 'home';
+    const club = isHome ? this.homeClub : this.awayClub;
+    const isUserTeam = club.id === this.userClubId;
+    const squad = isHome ? this.homeSquad : this.awaySquad;
+    const activePlayerIds = (isHome ? this.homePlayers : this.awayPlayers).map(p => p.id);
+
+    const matchInjuries = [
+      { name: 'Hamstring Pull', weeks: 2, severity: 'MINOR' as const },
+      { name: 'Head Knock / HIA Assessment', weeks: 1, severity: 'MINOR' as const },
+      { name: 'Ankle Ligament Sprain', weeks: 3, severity: 'MODERATE' as const },
+      { name: 'Shoulder AC Joint Separation', weeks: 4, severity: 'MODERATE' as const },
+      { name: 'Knee Ligament Strain', weeks: 5, severity: 'SEVERE' as const }
+    ];
+    const chosen = matchInjuries[Math.floor(Math.random() * matchInjuries.length)];
+
+    player.isInjuredInMatch = true;
+    player.stats.injured = true;
+
+    // Get ranked replacements from bench
+    const ranked = SubstitutionService.getRankedReplacements({
+      targetPosition: player.primaryPosition,
+      benchPlayers: squad,
+      activeOnPitchPlayerIds: activePlayerIds,
+      alreadySubstitutedOffIds: []
+    });
+    const bestCandidate = ranked[0]?.player;
+
+    const injuryEvent: LiveMatchInjuryEvent = {
+      injuredPlayerId: player.id,
+      injuredPlayerName: player.name,
+      jerseyNumber: player.number,
+      injuryName: chosen.name,
+      severity: chosen.severity,
+      durationWeeks: chosen.weeks,
+      description: `${player.name} went down clutching his ${chosen.name.toLowerCase()} after heavy collision contact.`,
+      recommendedSub: bestCandidate ? {
+        playerId: bestCandidate.id,
+        jerseyNumber: 16,
+        name: bestCandidate.name,
+        overall: bestCandidate.overall,
+        position: bestCandidate.primaryPosition
+      } : undefined
+    };
+
+    if (isUserTeam) {
+      this.pause();
+      soundFx.playWhistle('short');
+      this.state.pendingLiveInjury = injuryEvent;
+      this.addCommentary(`🚨 INJURY ALERT: ${player.name} is down hurt! Referee calls time off for medical staff.`);
+      if (this.onUpdateCallback) {
+        this.onUpdateCallback(this);
+      }
+    } else {
+      // AI opponent: if sub available and severe, make sub, else play on
+      if (injuryEvent.recommendedSub && (chosen.severity !== 'MINOR' || Math.random() < 0.6)) {
+        this.executeSingleSubstitution({
+          id: `ai_inj_sub_${Date.now()}`,
+          onPitchJersey: player.number,
+          offPlayerId: player.id,
+          offPlayerName: player.name,
+          offPosition: player.primaryPosition,
+          onPlayerId: injuryEvent.recommendedSub.playerId,
+          onPlayerName: injuryEvent.recommendedSub.name,
+          onPlayerPosition: injuryEvent.recommendedSub.position as any,
+          isInjurySub: true
+        });
+      } else {
+        player.strugglingPlayingOn = true;
+        player.energy = Math.max(20, player.energy - 30);
+        player.speed = Math.max(3.2, player.speed * 0.75);
+        this.addCommentary(`⚠️ ${player.name} is struggling... plays on at less than his best.`);
+      }
+    }
   }
 
   private resolveRuck() {
@@ -813,24 +1217,144 @@ export class RugbyMatchEngine {
   }
 
   private handlePenaltyAwarded(awardedTo: 'home' | 'away') {
+    this.applyPendingSubstitutions();
     this.state.possessionTeam = awardedTo;
-    const tactics = awardedTo === 'home' ? this.homeTactics : this.awayTactics;
-    const isInsideKickingRange = awardedTo === 'home' ? this.ball.x >= 55 : this.ball.x <= 45;
+    const isUserTeam = (awardedTo === 'home' && this.homeClub.id === this.userClubId) ||
+                       (awardedTo === 'away' && this.awayClub.id === this.userClubId);
 
-    if (tactics.penaltyChoice === 'POSTS' || (isInsideKickingRange && tactics.penaltyChoice !== 'CORNER_LINEOUT')) {
-      // Shot at goal
-      this.setupPenaltyKick(awardedTo);
-    } else if (tactics.penaltyChoice === 'CORNER_LINEOUT') {
-      // Kick to corner
-      const touchX = awardedTo === 'home' ? Math.min(95, this.ball.x + 30) : Math.max(5, this.ball.x - 30);
-      this.callLineout(awardedTo, touchX, 5);
+    const attackingClub = awardedTo === 'home' ? this.homeClub : this.awayClub;
+    const defendingClub = awardedTo === 'home' ? this.awayClub : this.homeClub;
+    const players = awardedTo === 'home' ? this.homePlayers : this.awayPlayers;
+
+    const postsX = awardedTo === 'home' ? 100 : 0;
+    const postsY = 35;
+    const distance = Math.hypot(postsX - this.ball.x, postsY - this.ball.y);
+    const yDiff = Math.abs(postsY - this.ball.y);
+    const angleDescription: 'Central' | 'Slight Angle' | 'Acute Touchline Angle' =
+      yDiff <= 8 ? 'Central' : yDiff <= 18 ? 'Slight Angle' : 'Acute Touchline Angle';
+
+    // Calculate kicker candidates and success percentages factoring in kicking attribute and morale confidence!
+    const kickerCandidates: PenaltyKickerCandidate[] = players
+      .filter(p => p.state !== 'sin_bin')
+      .map(p => {
+        const baseChance = (p.kickingAttr / 100) * 94;
+        const distPenalty = Math.max(0, (distance - 20) * 1.35);
+        const angPenalty = yDiff * 0.75;
+        const moraleBonus = p.confidenceModifier * 2.5; // In-game confidence matters!
+        const successChance = Math.max(15, Math.min(96, Math.round(baseChance - distPenalty - angPenalty + moraleBonus)));
+        return {
+          playerId: p.id,
+          number: p.number,
+          name: p.name,
+          kickingAttr: p.kickingAttr,
+          morale: p.morale,
+          confidenceTier: p.confidenceTier,
+          successChance
+        };
+      })
+      .sort((a, b) => {
+        // Prefer natural kickers (#10 Fly-half, #15 Fullback, #12 Inside Centre) or highest success chance
+        const aPref = a.number === 10 ? 30 : a.number === 15 ? 20 : a.number === 12 ? 10 : 0;
+        const bPref = b.number === 10 ? 30 : b.number === 15 ? 20 : b.number === 12 ? 10 : 0;
+        return (b.successChance + bPref) - (a.successChance + aPref);
+      });
+
+    const isInsideKickingRange = distance <= 45;
+    const tactics = awardedTo === 'home' ? this.homeTactics : this.awayTactics;
+
+    let defaultChoice: PenaltyDecisionOption = 'POSTS';
+    let recommendedChoice: PenaltyDecisionOption = 'POSTS';
+
+    if (tactics.penaltyChoice === 'CORNER_LINEOUT' || !isInsideKickingRange) {
+      defaultChoice = 'CORNER_LINEOUT';
+      recommendedChoice = 'CORNER_LINEOUT';
+    } else if (tactics.penaltyChoice === 'SCRUM') {
+      defaultChoice = 'SCRUM';
+      recommendedChoice = 'SCRUM';
     } else {
-      // Scrum option
+      defaultChoice = 'POSTS';
+      recommendedChoice = isInsideKickingRange ? 'POSTS' : 'CORNER_LINEOUT';
+    }
+
+    if (isUserTeam && !this.state.autoDecidePenalties) {
+      // Pause simulation for user interactive penalty decision
+      this.pause();
+      soundFx.playWhistle('short');
+      this.state.pendingPenaltyDecision = {
+        team: awardedTo,
+        isUserTeam: true,
+        fieldX: Math.round(this.ball.x),
+        fieldY: Math.round(this.ball.y),
+        distanceToPostsMetres: Math.round(distance),
+        angleDescription,
+        availableKickers: kickerCandidates.slice(0, 5),
+        defaultChoice,
+        recommendedChoice,
+        reason: `Penalty conceded by ${defendingClub.shortName} at ${Math.round(this.ball.x)}m mark`
+      };
+      this.addCommentary(`🚨 PENALTY to ${attackingClub.name}! Referee stops play. Coach: Choose your penalty option.`);
+      if (this.onUpdateCallback) {
+        this.onUpdateCallback(this);
+      }
+      return;
+    }
+
+    // Tactical AI decision for opponent or auto-decide
+    let aiChoice: PenaltyDecisionOption = defaultChoice;
+    const currentScoreDiff = awardedTo === 'home'
+      ? (this.state.homeScore - this.state.awayScore)
+      : (this.state.awayScore - this.state.homeScore);
+
+    if (isInsideKickingRange && (currentScoreDiff <= 3 || this.state.matchMinute >= 70)) {
+      aiChoice = 'POSTS';
+    } else if (currentScoreDiff < -7 && this.state.matchMinute >= 65) {
+      aiChoice = 'CORNER_LINEOUT';
+    } else if (!isInsideKickingRange) {
+      aiChoice = 'CORNER_LINEOUT';
+    }
+
+    const bestKicker = kickerCandidates[0];
+    this.executePenaltyDecision(aiChoice, bestKicker?.playerId);
+  }
+
+  public executePenaltyDecision(option: PenaltyDecisionOption, kickerPlayerId?: string) {
+    const awardedTo = this.state.possessionTeam;
+    const club = awardedTo === 'home' ? this.homeClub : this.awayClub;
+    const players = awardedTo === 'home' ? this.homePlayers : this.awayPlayers;
+    this.state.pendingPenaltyDecision = null;
+
+    if (option === 'POSTS') {
+      const kicker = players.find(p => p.id === kickerPlayerId) || players.find(p => p.number === 10) || players[0];
+      this.chosenPenaltyKickerId = kicker.id;
+      this.setupPenaltyKick(awardedTo, kicker);
+      this.play();
+    } else if (option === 'CORNER_LINEOUT') {
+      soundFx.playKick();
+      const kicker = players.find(p => p.id === kickerPlayerId) || players.find(p => p.number === 10) || players[0];
+      const touchX = awardedTo === 'home' ? Math.min(95, this.ball.x + 32) : Math.max(5, this.ball.x - 32);
+      this.addEvent('PENALTY_DECISION', `${kicker.name} boots penalty to touch! 5m attacking lineout for ${club.shortName}.`, club.id, kicker.id);
+      this.callLineout(awardedTo, touchX, 5);
+      this.play();
+    } else if (option === 'SCRUM') {
+      this.addEvent('PENALTY_DECISION', `${club.shortName} opt for an attacking scrum at the mark!`, club.id);
       this.callScrum(awardedTo, 'Penalty option - attacking scrum chosen!');
+      this.play();
+    } else if (option === 'TAP_AND_GO') {
+      soundFx.playWhistle('short');
+      const runner = players.find(p => p.id === kickerPlayerId) || players.find(p => p.number === 9) || players[0];
+      this.giveBallToPlayer(runner);
+      this.resetPlayerStates();
+      this.state.phase = 'OPEN_PLAY';
+      this.state.phaseTimer = 3.5;
+      runner.state = 'carrying';
+      runner.vx = awardedTo === 'home' ? 3.0 : -3.0;
+      this.addEvent('PENALTY_DECISION', `⚡ QUICK TAP & GO! ${runner.name} attacks the retreating defence!`, club.id, runner.id);
+      this.play();
     }
   }
 
   public callScrum(awardedTo: 'home' | 'away', reason: string) {
+    this.applyPendingSubstitutions();
     this.state.phase = 'SCRUM';
     this.state.phaseTimer = 2.8;
     this.state.possessionTeam = awardedTo;
@@ -869,6 +1393,7 @@ export class RugbyMatchEngine {
   }
 
   public callLineout(awardedTo: 'home' | 'away', x: number, y: number) {
+    this.applyPendingSubstitutions();
     this.state.phase = 'LINEOUT';
     this.state.phaseTimer = 2.5;
     this.state.possessionTeam = awardedTo;
@@ -904,6 +1429,7 @@ export class RugbyMatchEngine {
   }
 
   private scoreTry(scorer: VisualPlayer) {
+    this.applyPendingSubstitutions();
     soundFx.playCrowdCheer();
     soundFx.playWhistle('short');
 
@@ -931,7 +1457,9 @@ export class RugbyMatchEngine {
     this.state.phaseTimer = 3.0;
 
     const kickerTeam = this.state.possessionTeam;
-    const kicker = (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 10) || this.homePlayers[9];
+    const kicker = (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 10) ||
+                   (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 15) ||
+                   this.homePlayers[0];
 
     // Place tee at suitable distance
     const teeX = kickerTeam === 'home' ? 82 : 18;
@@ -957,10 +1485,15 @@ export class RugbyMatchEngine {
   private resolveConversion() {
     soundFx.playKick();
     const kickerTeam = this.state.possessionTeam;
-    const kicker = (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 10) || this.homePlayers[9];
+    const kicker = (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 10) ||
+                   (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 15) ||
+                   this.homePlayers[0];
 
-    // Conversion probability based on kicker attribute (typically 75-88%)
-    const success = Math.random() < 0.82;
+    // Conversion probability based on kicker attribute & in-game confidence
+    const baseChance = (kicker.kickingAttr / 100) * 88;
+    const moraleBoost = kicker.confidenceModifier * 2.2;
+    const successProb = Math.max(0.25, Math.min(0.96, (baseChance + moraleBoost) / 100));
+    const success = Math.random() < successProb;
 
     if (success) {
       soundFx.playCrowdCheer();
@@ -979,21 +1512,35 @@ export class RugbyMatchEngine {
     this.setupKickoff(kickerTeam === 'home' ? 'away' : 'home');
   }
 
-  private setupPenaltyKick(team: 'home' | 'away') {
+  private setupPenaltyKick(team: 'home' | 'away', chosenKicker?: VisualPlayer) {
     this.state.phase = 'PENALTY_KICK';
     this.state.phaseTimer = 2.8;
 
-    const kicker = (team === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 10) || this.homePlayers[9];
+    const players = team === 'home' ? this.homePlayers : this.awayPlayers;
+    const kicker = chosenKicker || (this.chosenPenaltyKickerId ? players.find(p => p.id === this.chosenPenaltyKickerId) : null) || players.find(p => p.number === 10) || players[0];
+    this.chosenPenaltyKickerId = kicker.id;
     this.ball.state = 'placed_for_kick';
     kicker.state = 'kicking';
-    this.addCommentary(`${kicker.name} steps up to kick the penalty at goal...`);
+    const dist = Math.round(Math.hypot(team === 'home' ? 100 - this.ball.x : this.ball.x, 35 - this.ball.y));
+    this.addCommentary(`${kicker.name} steps up to kick the penalty at goal from ${dist}m out...`);
   }
 
   private resolvePenaltyKick() {
     soundFx.playKick();
     const kickerTeam = this.state.possessionTeam;
-    const kicker = (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 10) || this.homePlayers[9];
-    const success = Math.random() < 0.78;
+    const players = kickerTeam === 'home' ? this.homePlayers : this.awayPlayers;
+    const kicker = (this.chosenPenaltyKickerId ? players.find(p => p.id === this.chosenPenaltyKickerId) : null) || players.find(p => p.number === 10) || players[0];
+
+    const postsX = kickerTeam === 'home' ? 100 : 0;
+    const distance = Math.hypot(postsX - this.ball.x, 35 - this.ball.y);
+    const yDiff = Math.abs(35 - this.ball.y);
+    const baseChance = (kicker.kickingAttr / 100) * 94;
+    const distPenalty = Math.max(0, (distance - 20) * 1.35);
+    const angPenalty = yDiff * 0.75;
+    const moraleBonus = kicker.confidenceModifier * 2.5;
+    const successProb = Math.max(0.15, Math.min(0.96, (baseChance - distPenalty - angPenalty + moraleBonus) / 100));
+
+    const success = Math.random() < successProb;
 
     if (success) {
       soundFx.playCrowdCheer();
@@ -1003,10 +1550,13 @@ export class RugbyMatchEngine {
         this.state.awayScore += 3;
       }
       kicker.stats.penalties++;
-      this.addEvent('PENALTY_GOAL', `PENALTY GOAL! Clean strike by ${kicker.name} sails over the crossbar! (+3 pts)`, kickerTeam === 'home' ? this.homeClub.id : this.awayClub.id, kicker.id);
+      const confTag = kicker.confidenceModifier > 0 ? ' [High Confidence]' : kicker.confidenceModifier < 0 ? ' [Under Pressure]' : '';
+      this.addEvent('PENALTY_GOAL', `PENALTY GOAL! Clean strike by ${kicker.name} sails over the crossbar from ${Math.round(distance)}m! (+3 pts)${confTag}`, kickerTeam === 'home' ? this.homeClub.id : this.awayClub.id, kicker.id);
+      this.chosenPenaltyKickerId = null;
       this.setupKickoff(kickerTeam === 'home' ? 'away' : 'home');
     } else {
-      this.addEvent('PENALTY_MISS', `Penalty missed! Pushed wide left. 22m dropout for defending side.`, kickerTeam === 'home' ? this.homeClub.id : this.awayClub.id, kicker.id);
+      this.addEvent('PENALTY_MISS', `Penalty missed! ${kicker.name}'s kick from ${Math.round(distance)}m drifts wide. 22m dropout for defending side.`, kickerTeam === 'home' ? this.homeClub.id : this.awayClub.id, kicker.id);
+      this.chosenPenaltyKickerId = null;
       this.setupKickoff(kickerTeam === 'home' ? 'away' : 'home');
     }
   }
@@ -1089,6 +1639,8 @@ export class RugbyMatchEngine {
 
   // Fast forward / instant sim to completion
   public instantSimulateToEnd(): Fixture['result'] {
+    this.state.pendingPenaltyDecision = null;
+    this.state.autoDecidePenalties = true;
     while (this.state.matchMinute < 80) {
       // Step chunks of 30 seconds
       this.state.matchMinute += 0.5;
