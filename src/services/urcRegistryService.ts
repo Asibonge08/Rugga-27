@@ -22,6 +22,7 @@ import {
 import rawUrcData from '../data/urcOfficialDatabase.json';
 import { INTERNATIONAL_RATINGS, calibratePlayerRating } from './urcScraper';
 import { recalculateBatchRatings, recalculatePlayerRating } from './playerRatingService';
+import { ensurePlayerHasMinimumPositions } from '../data/rugbyPositions';
 
 export interface OfficialClubInfo {
   id: string;                  // Stable internal club ID, e.g. 'stormers', 'bulls'
@@ -152,10 +153,13 @@ class UrcRegistryService {
       // Specific official URC positioning overrides
       if (lower === 'grant williams') {
         player.primaryPosition = 'SCRUM_HALF';
-        player.secondaryPositions = ['RIGHT_WING'];
+        player.secondaryPositions = ['RIGHT_WING', 'FLY_HALF'];
         player.overall = Math.max(player.overall, 93);
         player.potential = Math.max(player.potential, 94);
       }
+
+      // Guarantee every player has a minimum of 2 positions they can play
+      ensurePlayerHasMinimumPositions(player);
 
       cleanList.push(player);
     }

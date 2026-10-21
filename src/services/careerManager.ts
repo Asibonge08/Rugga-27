@@ -1,9 +1,157 @@
-import { Club, Player, LeagueId, TacticsConfig, MatchSelection, LeagueTableRow, Fixture, InboxMessage, TransferOffer, ScoutingAssignment, StaffMember, RugbyPosition, FORWARD_POSITIONS, isFrontRow, PlayerAttributes } from '../types/rugby';
-import { INITIAL_CLUBS, generateClubSquad, generateFixturesForLeague, calculatePlayerOverall, POSITIONS_ORDER, getPositionShort, getPositionName, JERSEY_TO_POSITION } from '../data/rugbyDatabase';
+import {
+  Club,
+  Player,
+  LeagueId,
+  TacticsConfig,
+  MatchSelection,
+  LeagueTableRow,
+  Fixture,
+  InboxMessage,
+  TransferOffer,
+  ScoutingAssignment,
+  StaffMember,
+  RugbyPosition,
+  FORWARD_POSITIONS,
+  BACK_POSITIONS,
+  isFrontRow,
+  PlayerAttributes,
+  SeasonPhase,
+  SeasonAwards,
+  OffSeasonSummaryData,
+  HistoricalSeasonRecord,
+  PlayerDevelopmentResult,
+  CareerMilestone
+} from '../types/rugby';
+import {
+  INITIAL_CLUBS,
+  generateClubSquad,
+  generateFixturesForLeague,
+  calculatePlayerOverall,
+  POSITIONS_ORDER,
+  getPositionShort,
+  getPositionName,
+  JERSEY_TO_POSITION,
+  ensurePlayerHasMinimumPositions,
+  getNaturalSecondaryPositions
+} from '../data/rugbyDatabase';
 import { getRivalry, calculateFanSatisfactionDelta } from '../data/rugbyRivalries';
 import { urcRegistry } from './urcRegistryService';
 import { checkPositionalEligibility, recalculatePlayerRating, recalculateBatchRatings, calculatePerformanceRating, deriveLastSeasonStats } from './playerRatingService';
 import { applyMatchPerformanceMorale, applyTeamResultMorale, applyWeeklyRotationMorale, initPlayerMoraleState } from './playerMoraleService';
+import { generateAuthenticPlayerName } from '../calculations';
+
+export function createDefaultMilestones(): CareerMilestone[] {
+  return [
+    {
+      id: 'unbeaten_10',
+      title: '10-Match Unbeaten Run',
+      description: 'Go 10 consecutive official matches without a defeat',
+      category: 'STREAK',
+      tier: 'GOLD',
+      icon: 'Flame',
+      unlocked: false,
+      progress: 0,
+      target: 10,
+      rewardCoins: 500
+    },
+    {
+      id: 'academy_debut',
+      title: 'Academy Graduate Debut',
+      description: 'Promote an academy graduate and start him in the First XV',
+      category: 'ACADEMY',
+      tier: 'SILVER',
+      icon: 'Sparkles',
+      unlocked: false,
+      progress: 0,
+      target: 1,
+      rewardCoins: 250
+    },
+    {
+      id: 'first_trophy',
+      title: 'First Trophy Win',
+      description: 'Crowned champions of the United Rugby Championship',
+      category: 'TROPHY',
+      tier: 'PLATINUM',
+      icon: 'Trophy',
+      unlocked: false,
+      progress: 0,
+      target: 1,
+      rewardCoins: 1000
+    },
+    {
+      id: 'derby_conqueror',
+      title: 'Derby Conqueror',
+      description: 'Defeat your fiercest traditional derby rivals 3 times',
+      category: 'MATCH',
+      tier: 'GOLD',
+      icon: 'Swords',
+      unlocked: false,
+      progress: 0,
+      target: 3,
+      rewardCoins: 400
+    },
+    {
+      id: 'high_roller_50',
+      title: 'Century Scoreline',
+      description: 'Score 50 or more points in a single competitive fixture',
+      category: 'MATCH',
+      tier: 'SILVER',
+      icon: 'Target',
+      unlocked: false,
+      progress: 0,
+      target: 50,
+      rewardCoins: 300
+    },
+    {
+      id: 'clean_sheet',
+      title: 'Defensive Fortress',
+      description: 'Win a match without conceding a single try (0 tries against)',
+      category: 'MATCH',
+      tier: 'BRONZE',
+      icon: 'Shield',
+      unlocked: false,
+      progress: 0,
+      target: 1,
+      rewardCoins: 200
+    },
+    {
+      id: 'home_fortress',
+      title: 'Home Fortress',
+      description: 'Win 5 consecutive home matches in your home stadium',
+      category: 'STREAK',
+      tier: 'SILVER',
+      icon: 'Building2',
+      unlocked: false,
+      progress: 0,
+      target: 5,
+      rewardCoins: 350
+    },
+    {
+      id: 'youth_pioneer',
+      title: 'Youth Pioneer',
+      description: 'Field 3 or more U-21 / Academy prospects in the Starting XV',
+      category: 'ACADEMY',
+      tier: 'GOLD',
+      icon: 'Users',
+      unlocked: false,
+      progress: 0,
+      target: 3,
+      rewardCoins: 450
+    },
+    {
+      id: 'financial_titan',
+      title: 'Financial Titan',
+      description: 'Build a healthy club balance of over £3,000,000',
+      category: 'FINANCE',
+      tier: 'PLATINUM',
+      icon: 'Coins',
+      unlocked: false,
+      progress: 0,
+      target: 3000000,
+      rewardCoins: 600
+    }
+  ];
+}
 
 export interface CareerState {
   version: number;
@@ -13,6 +161,10 @@ export interface CareerState {
   currentRound: number;
   weekNumber: number;
   coins: number;
+  seasonPhase: SeasonPhase;
+  careerYear: number;
+  totalCareerYears: number;
+  isTransferWindowOpen: boolean;
   lastDailyClaimTimestamp?: number;
   clubs: Club[];
   players: Player[];
@@ -30,6 +182,15 @@ export interface CareerState {
     intensity: 'LOW' | 'NORMAL' | 'HIGH';
   };
   activeTargetedTraining?: ActiveTargetedTraining | null;
+  lastOffSeasonSummary?: OffSeasonSummaryData | null;
+  seasonArchives?: HistoricalSeasonRecord[];
+  milestones: CareerMilestone[];
+  statsStreak?: {
+    unbeaten: number;
+    homeWins: number;
+    totalMatches: number;
+    derbyWins: number;
+  };
 }
 
 export interface ActiveTargetedTraining {
@@ -107,6 +268,9 @@ export class CareerManager {
         (p.clubId === 'sharks_urc' && lower === 'am')
       );
     });
+
+    // Ensure every single player has a minimum of 2 playable positions without exception
+    players.forEach(p => ensurePlayerHasMinimumPositions(p));
 
     // Calibrate all players' ratings going by current stats this season, last season stats, and potential
     recalculateBatchRatings(players);
@@ -200,6 +364,10 @@ export class CareerManager {
       currentRound: 1,
       weekNumber: 1,
       coins: 750,
+      seasonPhase: 'REGULAR_SEASON',
+      careerYear: 1,
+      totalCareerYears: 20,
+      isTransferWindowOpen: false, // Closed during regular season (Free agents only)
       clubs,
       players,
       fixtures: allFixtures,
@@ -217,7 +385,16 @@ export class CareerManager {
         focus: 'BALANCED',
         intensity: 'NORMAL'
       },
-      activeTargetedTraining: null
+      activeTargetedTraining: null,
+      lastOffSeasonSummary: null,
+      seasonArchives: [],
+      milestones: createDefaultMilestones(),
+      statsStreak: {
+        unbeaten: 0,
+        homeWins: 0,
+        totalMatches: 0,
+        derbyWins: 0
+      }
     };
 
     this.notify();
@@ -230,27 +407,26 @@ export class CareerManager {
 
     for (let i = 0; i < count; i++) {
       const pos = POSITIONS_ORDER[Math.floor(Math.random() * POSITIONS_ORDER.length)];
-      const names = ['Liam', 'Tiaan', 'Cian', 'Sipho', 'Finlay', 'Cobus', 'Duan', 'Callum'];
-      const surnames = ['Pretorius', 'O’Brien', 'Botha', 'Mthembu', 'Murphy', 'de Villiers', 'Fourie'];
-      const name = `${names[Math.floor(Math.random() * names.length)]} ${surnames[Math.floor(Math.random() * surnames.length)]}`;
+      const name = generateAuthenticPlayerName(club.country);
 
-      const baseRating = 62 + Math.floor(Math.random() * 10);
+      // Elite prospects spawn at 78–88 OVR with potential up to 95+
+      const baseRating = 78 + Math.floor(Math.random() * 9);
       const attrs = {
-        scrummaging: baseRating + Math.floor(Math.random() * 8),
+        scrummaging: baseRating + Math.floor(Math.random() * 6),
         hooking: baseRating,
         lineout: baseRating,
         breakdown: baseRating + 2,
-        tackling: baseRating + 4,
-        carrying: baseRating + 5,
-        offloading: baseRating,
-        passing: baseRating + 3,
-        kicking: baseRating - 2,
-        goalKicking: baseRating - 5,
-        speed: baseRating + 8,
-        strength: baseRating + 6,
-        fitness: 85,
-        tacticalAwareness: baseRating - 4,
-        workRate: baseRating + 5,
+        tackling: baseRating + 3,
+        carrying: baseRating + 4,
+        offloading: baseRating + 1,
+        passing: baseRating + 2,
+        kicking: baseRating,
+        goalKicking: baseRating - 2,
+        speed: baseRating + 5,
+        strength: baseRating + 4,
+        fitness: 92,
+        tacticalAwareness: baseRating,
+        workRate: baseRating + 4,
         consistency: baseRating
       };
 
@@ -262,15 +438,15 @@ export class CareerManager {
         age: 18 + Math.floor(Math.random() * 3),
         clubId,
         primaryPosition: pos,
-        secondaryPositions: [],
-        heightCm: 185,
-        weightKg: 96,
+        secondaryPositions: getNaturalSecondaryPositions(pos),
+        heightCm: 185 + Math.floor(Math.random() * 12),
+        weightKg: 96 + Math.floor(Math.random() * 18),
         attributes: attrs,
-        potential: Math.min(96, overall + 16 + Math.floor(Math.random() * 10)),
+        potential: Math.min(97, Math.max(92, overall + 8 + Math.floor(Math.random() * 6))),
         overall,
-        marketValue: 120000 + Math.floor(Math.random() * 150000),
-        weeklyWage: 800,
-        contractYearsLeft: 2,
+        marketValue: 260000 + Math.floor(Math.random() * 300000),
+        weeklyWage: 1200,
+        contractYearsLeft: 3,
         squadRole: 'Youth Prospect',
         fitness: 98,
         fatigue: 5,
@@ -301,6 +477,7 @@ export class CareerManager {
   // Update starting XV or Bench
   public updateLineup(startingXV: Record<number, string>, bench: Record<number, string>) {
     this.state.userLineup = { startingXV, bench };
+    this.checkMilestones();
     this.notify();
   }
 
@@ -497,7 +674,7 @@ export class CareerManager {
       17: ['HOOKER'],
       18: ['TH_PROP', 'LH_PROP'],
       19: ['LOCK_4', 'LOCK_5'],
-      20: ['FLANKER_6', 'FLANKER_7', 'NO_8'],
+      20: ['BLINDSIDE_FLANKER', 'OPENSIDE_FLANKER', 'NUMBER_8'],
       21: ['SCRUM_HALF'],
       22: ['FLY_HALF', 'INSIDE_CENTRE', 'OUTSIDE_CENTRE'],
       23: ['FULLBACK', 'LEFT_WING', 'RIGHT_WING', 'OUTSIDE_CENTRE']
@@ -633,6 +810,138 @@ export class CareerManager {
       msg.read = true;
       this.notify();
     }
+  }
+
+  public markAllMessagesAsRead(): void {
+    let changed = false;
+    this.state.inbox.forEach(msg => {
+      if (!msg.read) {
+        msg.read = true;
+        changed = true;
+      }
+    });
+    if (changed) {
+      this.notify();
+    }
+  }
+
+  /**
+   * Evaluates all Career Milestones and awards achievements, visual badges,
+   * coin purses, and inbox honours.
+   */
+  public checkMilestones(): CareerMilestone[] {
+    if (!this.state.milestones || this.state.milestones.length === 0) {
+      this.state.milestones = createDefaultMilestones();
+    }
+    if (!this.state.statsStreak) {
+      this.state.statsStreak = { unbeaten: 0, homeWins: 0, totalMatches: 0, derbyWins: 0 };
+    }
+
+    const newlyUnlocked: CareerMilestone[] = [];
+    const userClub = this.state.clubs.find(c => c.id === this.state.userClubId);
+    const currentDate = `Round ${this.state.currentRound}, Year ${this.state.careerYear} (${this.state.seasonYear})`;
+
+    // Check academy debut & youth pioneer from current lineup
+    const userSquad = this.state.players.filter(p => p.clubId === this.state.userClubId);
+    const starters = Object.values(this.state.userLineup?.startingXV || {})
+      .map(id => userSquad.find(p => p.id === id))
+      .filter((p): p is Player => !!p);
+
+    const academyStarters = starters.filter(p => 
+      p.id.includes('youth') || p.id.includes('acad') || p.id.startsWith('custom_acad') || p.age <= 21
+    );
+
+    this.state.milestones.forEach(m => {
+      if (m.unlocked) return;
+
+      let currentProgress = m.progress;
+      let shouldUnlock = false;
+
+      switch (m.id) {
+        case 'unbeaten_10':
+          currentProgress = this.state.statsStreak?.unbeaten || 0;
+          if (currentProgress >= m.target) shouldUnlock = true;
+          break;
+
+        case 'academy_debut':
+          if (academyStarters.length >= 1) {
+            currentProgress = 1;
+            shouldUnlock = true;
+          }
+          break;
+
+        case 'first_trophy': {
+          const urcTable = this.state.leagueTables?.URC || [];
+          const isTop = urcTable[0]?.clubId === this.state.userClubId;
+          const archivedTitle = (this.state.seasonArchives || []).some(a => a.championClubId === this.state.userClubId);
+          if (archivedTitle || (this.state.seasonPhase === 'OFF_SEASON' && isTop)) {
+            currentProgress = 1;
+            shouldUnlock = true;
+          }
+          break;
+        }
+
+        case 'derby_conqueror':
+          currentProgress = this.state.statsStreak?.derbyWins || 0;
+          if (currentProgress >= m.target) shouldUnlock = true;
+          break;
+
+        case 'high_roller_50':
+          if (m.progress >= m.target) shouldUnlock = true;
+          break;
+
+        case 'clean_sheet':
+          if (m.progress >= m.target) shouldUnlock = true;
+          break;
+
+        case 'home_fortress':
+          currentProgress = this.state.statsStreak?.homeWins || 0;
+          if (currentProgress >= m.target) shouldUnlock = true;
+          break;
+
+        case 'youth_pioneer':
+          currentProgress = Math.max(m.progress, academyStarters.length);
+          if (academyStarters.length >= m.target) shouldUnlock = true;
+          break;
+
+        case 'financial_titan':
+          currentProgress = userClub?.transferBudget || 0;
+          if (currentProgress >= m.target) shouldUnlock = true;
+          break;
+      }
+
+      m.progress = currentProgress;
+
+      if (shouldUnlock) {
+        m.unlocked = true;
+        m.unlockedDate = currentDate;
+        newlyUnlocked.push(m);
+
+        // Award reward coins
+        this.addCoins(m.rewardCoins, `Milestone Achieved: ${m.title}`);
+
+        // Dispatch celebratory inbox alert
+        this.state.inbox.unshift({
+          id: `milestone_${m.id}_${Date.now()}`,
+          date: currentDate,
+          sender: 'Board & Trophy Honours Committee',
+          subject: `🏅 MILESTONE UNLOCKED: "${m.title}"!`,
+          body: `Major Career Achievement Unlocked!\n\n"${m.title}"\n${m.description}\n\n• Tier: ${m.tier}\n• Reward: +${m.rewardCoins} Rugby Coins deposited into club account.\n\nYour management legacy is permanently etched into the club's Hall of Fame!`,
+          category: 'BOARD',
+          read: false,
+          actionRoute: {
+            screen: 'dashboard',
+            label: 'View Trophy Room & Badges'
+          }
+        });
+      }
+    });
+
+    if (newlyUnlocked.length > 0) {
+      this.notify();
+    }
+
+    return newlyUnlocked;
   }
 
   /**
@@ -984,8 +1293,76 @@ export class CareerManager {
           subject: `🪙 Match Purse: +${totalCoinsEarned} Rugby Coins Awarded!`,
           body: `Match Rewards Summary:\n• Result: +${baseCoins} Coins (${userWon ? 'Victory' : isDraw ? 'Draw' : 'Match Payout'})\n• Try Bonus: +${tryCoins} Coins (${userTries} Tries)\n${bonusCoins > 0 ? `• Bonus Point (4+ Tries): +${bonusCoins} Coins\n` : ''}\nTotal: +${totalCoinsEarned} Rugby Coins.\nCurrent Balance: ${this.state.coins.toLocaleString()} Coins. Visit the Club Store to exchange Coins for in-game Transfer & Wage Budget!`,
           category: 'BOARD',
-          read: false
+          read: false,
+          actionRoute: {
+            screen: 'finances',
+            label: 'Visit Club Store'
+          }
         });
+
+        // Matchday Ticket Revenue: (Attendance × Ticket Price) - Operational Expenses (20%)
+        if (isHome) {
+          const fanModifier = 0.6 + (((userClub.fanSatisfaction ?? 80) / 100) * 0.4);
+          const attendance = Math.round(userClub.stadiumCapacity * Math.min(1.0, 0.75 * fanModifier));
+          const ticketPrice = 30; // standard match ticket price
+          const grossTicketRevenue = attendance * ticketPrice;
+          const operationalExpenses = Math.round(grossTicketRevenue * 0.20);
+          const netMatchdayTicketRevenue = grossTicketRevenue - operationalExpenses;
+
+          userClub.transferBudget += netMatchdayTicketRevenue;
+
+          this.state.inbox.unshift({
+            id: `ticket_rev_${Date.now()}`,
+            date: `Week ${this.state.weekNumber}`,
+            sender: 'Stadium Operations & Ticketing',
+            subject: `🏟️ Matchday Gate Receipts: +£${netMatchdayTicketRevenue.toLocaleString()} Net Revenue`,
+            body: `Matchday Ticketing Breakdown:\n• Official Attendance: ${attendance.toLocaleString()} (${Math.round((attendance / userClub.stadiumCapacity) * 100)}% capacity)\n• Ticket Price: £${ticketPrice}\n• Gross Gate Receipts: £${grossTicketRevenue.toLocaleString()}\n• Operational & Matchday Expenses (20%): -£${operationalExpenses.toLocaleString()}\n• Net Matchday Revenue Credited: +£${netMatchdayTicketRevenue.toLocaleString()}\n\nFunds have been deposited into the club's transfer budget.`,
+            category: 'BOARD',
+            read: false,
+            actionRoute: {
+              screen: 'finances',
+              label: 'Inspect Club Finances'
+            }
+          });
+        }
+
+        // Update Career Streaks & Milestones
+        if (!this.state.statsStreak) {
+          this.state.statsStreak = { unbeaten: 0, homeWins: 0, totalMatches: 0, derbyWins: 0 };
+        }
+        this.state.statsStreak.totalMatches++;
+
+        if (userWon || isDraw) {
+          this.state.statsStreak.unbeaten++;
+        } else {
+          this.state.statsStreak.unbeaten = 0;
+        }
+
+        if (isHome) {
+          if (userWon) {
+            this.state.statsStreak.homeWins++;
+          } else {
+            this.state.statsStreak.homeWins = 0;
+          }
+        }
+
+        if (isRivalry && userWon) {
+          this.state.statsStreak.derbyWins++;
+        }
+
+        // Direct match milestones updates
+        const highRoller = (this.state.milestones || []).find(m => m.id === 'high_roller_50');
+        if (highRoller && !highRoller.unlocked) {
+          highRoller.progress = Math.max(highRoller.progress, userScore);
+        }
+
+        const cleanSheet = (this.state.milestones || []).find(m => m.id === 'clean_sheet');
+        const oppTries = isHome ? result.awayTries : result.homeTries;
+        if (cleanSheet && !cleanSheet.unlocked && userWon && oppTries === 0) {
+          cleanSheet.progress = 1;
+        }
+
+        this.checkMilestones();
       }
     }
 
@@ -1117,18 +1494,38 @@ export class CareerManager {
       const matchStat = allStats[pid];
       const p = this.state.players.find(x => x.id === pid);
       if (p) {
+        if (!p.stats) {
+          p.stats = {
+            matchesPlayed: 0,
+            tries: 0,
+            conversions: 0,
+            penalties: 0,
+            dropGoals: 0,
+            points: 0,
+            tacklesMade: 0,
+            tacklesMissed: 0,
+            turnoversWon: 0,
+            metresCarried: 0,
+            yellowCards: 0,
+            redCards: 0,
+            avgRating: 7.0
+          };
+        }
         p.stats.matchesPlayed++;
-        p.stats.tries += matchStat.tries;
-        p.stats.conversions += matchStat.conversions;
-        p.stats.penalties += matchStat.penalties;
-        p.stats.tacklesMade += matchStat.tacklesMade;
-        p.stats.turnoversWon += matchStat.turnoversWon;
-        p.stats.metresCarried += Math.round(matchStat.metresCarried);
+        p.stats.tries += matchStat.tries || 0;
+        p.stats.conversions += matchStat.conversions || 0;
+        p.stats.penalties += matchStat.penalties || 0;
+        p.stats.points = (p.stats.tries * 5) + (p.stats.conversions * 2) + (p.stats.penalties * 3) + (p.stats.dropGoals * 3);
+        p.stats.tacklesMade += matchStat.tacklesMade || 0;
+        p.stats.tacklesMissed += matchStat.tacklesMissed || 0;
+        p.stats.turnoversWon += matchStat.turnoversWon || 0;
+        p.stats.metresCarried += Math.round(matchStat.metresCarried || 0);
         if (matchStat.yellowCard) p.stats.yellowCards++;
         if (matchStat.redCard) p.stats.redCards++;
 
         // Moving average of rating
-        p.stats.avgRating = Number(((p.stats.avgRating * (p.stats.matchesPlayed - 1) + matchStat.rating) / p.stats.matchesPlayed).toFixed(1));
+        const currentRating = typeof matchStat.rating === 'number' ? matchStat.rating : 6.5;
+        p.stats.avgRating = Number((((p.stats.avgRating || 7.0) * (p.stats.matchesPlayed - 1) + currentRating) / p.stats.matchesPlayed).toFixed(1));
 
         // Workload-based in-match fatigue calculation
         const staminaEngine = (p.attributes?.fitness || 75) / 100;
@@ -1216,6 +1613,13 @@ export class CareerManager {
       if (this.state.activeTargetedTraining.weeksRemaining <= 0) {
         this.completeTargetedTraining(this.state.activeTargetedTraining);
       }
+    }
+
+    // Auto-check for end of regular season (all round 18 fixtures completed)
+    const allFixturesPlayed = this.state.fixtures.length > 0 && this.state.fixtures.every(f => f.played);
+    if (allFixturesPlayed && this.state.seasonPhase === 'REGULAR_SEASON') {
+      this.processEndOfSeason();
+      return;
     }
 
     const userClub = this.state.clubs.find(c => c.id === this.state.userClubId);
@@ -1436,16 +1840,30 @@ export class CareerManager {
 
     if (!userClub || !player) return { success: false, message: 'Invalid club or player' };
 
-    if (userClub.transferBudget < transferFee) {
+    const isFreeAgent = player.clubId === 'free_agents';
+
+    // Transfer window check: if closed and not a free agent, reject
+    if (!this.state.isTransferWindowOpen && !isFreeAgent) {
+      return {
+        success: false,
+        message: 'Transfer market is CLOSED. During the regular season, only unattached Free Agents may be signed. Full club transfers re-open in Pre-Season.'
+      };
+    }
+
+    const actualFee = isFreeAgent ? 0 : transferFee;
+
+    if (userClub.transferBudget < actualFee) {
       return { success: false, message: 'Insufficient transfer funds' };
     }
 
-    const sellingClub = this.state.clubs.find(c => c.id === player.clubId);
+    const sellingClub = !isFreeAgent ? this.state.clubs.find(c => c.id === player.clubId) : null;
 
     // Complete transaction
-    userClub.transferBudget -= transferFee;
-    if (sellingClub) {
-      sellingClub.transferBudget += transferFee;
+    if (actualFee > 0) {
+      userClub.transferBudget -= actualFee;
+      if (sellingClub) {
+        sellingClub.transferBudget += actualFee;
+      }
     }
 
     player.clubId = userClub.id;
@@ -1459,13 +1877,21 @@ export class CareerManager {
       date: `Week ${this.state.weekNumber}`,
       sender: 'Chief Executive',
       subject: `Official Confirmation: ${player.name} Signs for ${userClub.name}!`,
-      body: `We are delighted to officially welcome ${player.name} (${player.primaryPosition}) to ${userClub.name}. The transfer fee of £${transferFee.toLocaleString()} has been processed.`,
+      body: `We are delighted to officially welcome ${player.name} (${getPositionShort(player.primaryPosition)}, Age ${player.age}) to ${userClub.name}.\n\n` +
+        (isFreeAgent
+          ? `• Free Agent signing (zero transfer fee)\n• Contract: ${contractYears} Years @ £${wage.toLocaleString()}/wk\n• Designated Role: ${role}`
+          : `• Transfer fee of £${actualFee.toLocaleString()} processed\n• Contract: ${contractYears} Years @ £${wage.toLocaleString()}/wk\n• Designated Role: ${role}`),
       category: 'TRANSFER',
       read: false
     });
 
     this.notify();
-    return { success: true, message: `Successfully signed ${player.name}!` };
+    return {
+      success: true,
+      message: isFreeAgent
+        ? `Signed free agent ${player.name} on a ${contractYears}-year deal!`
+        : `Successfully signed ${player.name} for £${actualFee.toLocaleString()}!`
+    };
   }
 
   public sellPlayer(playerId: string, fee: number): { success: boolean; message: string } {
@@ -1512,6 +1938,7 @@ export class CareerManager {
     }
 
     const p = this.state.youthProspects.splice(prospectIdx, 1)[0];
+    ensurePlayerHasMinimumPositions(p);
     p.squadRole = 'Squad Rotation';
     p.contractYearsLeft = Math.max(2, p.contractYearsLeft);
     this.state.players.push(p);
@@ -1523,7 +1950,12 @@ export class CareerManager {
       subject: `Academy graduate ${p.name} promoted to Senior First Team!`,
       body: `Exciting young talent ${p.name} (Age ${p.age}, OVR ${p.overall}, POT ${p.potential}) has signed his first professional senior contract. He is now registered for senior matchday selection.`,
       category: 'BOARD',
-      read: false
+      read: false,
+      actionRoute: {
+        screen: 'squad',
+        targetEntityId: p.id,
+        label: 'Select in Senior Squad'
+      }
     });
 
     this.notify();
@@ -1624,7 +2056,7 @@ export class CareerManager {
       age: Math.min(23, Math.max(16, data.age)),
       clubId: this.state.userClubId,
       primaryPosition: data.primaryPosition,
-      secondaryPositions: [],
+      secondaryPositions: getNaturalSecondaryPositions(data.primaryPosition),
       heightCm: isForward ? 192 : 182,
       weightKg: isForward ? 106 : 88,
       attributes: attrs,
@@ -1699,7 +2131,11 @@ export class CareerManager {
         intake.map(p => `• ${p.name} (${getPositionShort(p.primaryPosition)}, Age ${p.age}, OVR ${p.overall}, POT ${p.potential})`).join('\n') +
         `\n\nMonitor their growth and prepare high-ceiling prospects for senior promotion.`,
       category: 'SCOUTING',
-      read: false
+      read: false,
+      actionRoute: {
+        screen: 'academy',
+        label: 'View Youth Academy'
+      }
     });
 
     this.notify();
@@ -1859,6 +2295,769 @@ export class CareerManager {
     return { success: true, message: `Upgraded ${facilityKey} to Level ${userClub.facilities[facilityKey]}!` };
   }
 
+  /**
+   * Contract Renewal System:
+   * Negotiates salary & multi-year contract duration (1-5 years) for an existing player.
+   * Prevents player from hitting Free Agency upon contract expiry.
+   */
+  public renewPlayerContract(
+    playerId: string,
+    weeklyWage: number,
+    years: number,
+    role: Player['squadRole']
+  ): { success: boolean; message: string; accepted: boolean } {
+    const userClub = this.state.clubs.find(c => c.id === this.state.userClubId);
+    const player = this.state.players.find(p => p.id === playerId);
+
+    if (!userClub || !player) return { success: false, message: 'Player not found', accepted: false };
+
+    // Minimum acceptable wage formula based on player overall and role
+    const expectedWage = Math.round((player.marketValue / 100) * 1.45);
+    const minAcceptableWage = Math.round(expectedWage * 0.82);
+
+    if (weeklyWage < minAcceptableWage) {
+      return {
+        success: false,
+        accepted: false,
+        message: `Renewal Rejected: ${player.name}'s representative turned down £${weeklyWage.toLocaleString()}/wk. Demands at least £${minAcceptableWage.toLocaleString()}/wk for a ${years}-year extension.`
+      };
+    }
+
+    player.weeklyWage = weeklyWage;
+    player.contractYearsLeft = years;
+    player.squadRole = role;
+    player.morale = Math.min(100, player.morale + 15);
+
+    this.state.inbox.unshift({
+      id: `renew_${player.id}_${Date.now()}`,
+      date: `Week ${this.state.weekNumber}`,
+      sender: `${player.name} (Player Representative)`,
+      subject: `✍️ CONTRACT RENEWAL: ${player.name} signs ${years}-year extension!`,
+      body: `Renewal Agreement Finalized:\n\n${player.name} has signed a ${years}-year contract extension at ${userClub.name} earning £${weeklyWage.toLocaleString()}/week.\n\n• Designated Role: ${role}\n• Contract Expiry: Season ${this.state.seasonYear + years}\n• Morale: 100% (Ecstatic to commit future to the club).`,
+      category: 'TRANSFER',
+      read: false
+    });
+
+    this.notify();
+    return {
+      success: true,
+      accepted: true,
+      message: `Renewal Accepted! ${player.name} has signed a ${years}-year extension at £${weeklyWage.toLocaleString()}/wk.`
+    };
+  }
+
+  /**
+   * Probability-based Retirement System for players aged 35+:
+   * Checks player age at the end of each season. Players aged 35+ undergo a probability check
+   * based on age, injury history, and stamina. Retiring players are removed from club rosters,
+   * opening up their salary budget space and freeing wage commitments.
+   */
+  public evaluateRetirements(): OffSeasonSummaryData['retiredPlayers'] {
+    const retiredList: OffSeasonSummaryData['retiredPlayers'] = [];
+    const remainingPlayers: Player[] = [];
+
+    for (const player of this.state.players) {
+      if (player.age >= 35) {
+        // Base probability curve
+        let retireProb = 0.25; // age 35
+        if (player.age === 36) retireProb = 0.45;
+        else if (player.age === 37) retireProb = 0.70;
+        else if (player.age === 38) retireProb = 0.85;
+        else if (player.age >= 39) retireProb = 0.95;
+        if (player.age >= 41) retireProb = 1.0;
+
+        // Conditioning & injury modifiers
+        if (player.injury) retireProb += 0.15;
+        if ((player.injuryHistory?.length || 0) >= 3) retireProb += 0.10;
+        if (player.fitness < 75) retireProb += 0.10;
+
+        const roll = Math.random();
+        if (roll < retireProb) {
+          // Player Hangs Up Boots!
+          const club = this.state.clubs.find(c => c.id === player.clubId);
+          const clubName = club?.name || (player.clubId === 'free_agents' ? 'Free Agent' : 'Club Legend');
+          const freedWage = player.weeklyWage * 52; // Annual salary freed
+          const wasUserPlayer = player.clubId === this.state.userClubId;
+
+          retiredList.push({
+            id: player.id,
+            name: player.name,
+            age: player.age,
+            clubName,
+            position: player.primaryPosition,
+            freedWage,
+            wasUserPlayer
+          });
+
+          // If in user lineup, remove from startingXV and bench
+          if (wasUserPlayer) {
+            Object.keys(this.state.userLineup.startingXV).forEach(k => {
+              if (this.state.userLineup.startingXV[Number(k)] === player.id) {
+                delete this.state.userLineup.startingXV[Number(k)];
+              }
+            });
+            Object.keys(this.state.userLineup.bench).forEach(k => {
+              if (this.state.userLineup.bench[Number(k)] === player.id) {
+                delete this.state.userLineup.bench[Number(k)];
+              }
+            });
+
+            this.state.inbox.unshift({
+              id: `retire_${player.id}_${Date.now()}`,
+              date: `Off-Season Year ${this.state.seasonYear}`,
+              sender: 'Board & Supporters Club',
+              subject: `🎖️ RETIREMENT: ${player.name} announces rugby retirement at Age ${player.age}`,
+              body: `Farewell to a stalwart:\n\n${player.name} (${getPositionShort(player.primaryPosition)}, Age ${player.age}) has officially announced his retirement from professional rugby.\n\nHis departure vacates £${player.weeklyWage.toLocaleString()}/wk (£${(player.weeklyWage * 52).toLocaleString()}/yr) in club wage bill space.\n\nWe thank him for his exemplary service, leadership, and sacrifice on the pitch.`,
+              category: 'BOARD',
+              read: false
+            });
+          }
+
+          // Do not add to remainingPlayers -> removed from active club rosters!
+          continue;
+        }
+      }
+
+      remainingPlayers.push(player);
+    }
+
+    this.state.players = remainingPlayers;
+    return retiredList;
+  }
+
+  /**
+   * Contract Expiries & Free Agency Transition:
+   * Decrements contract lengths. If a player reaches 0 years left without renewal,
+   * automatically moves them to the Free Agent pool and triggers an inbox alert.
+   */
+  public evaluateContractExpiries(): OffSeasonSummaryData['expiredToFreeAgents'] {
+    const expiredList: OffSeasonSummaryData['expiredToFreeAgents'] = [];
+
+    for (const player of this.state.players) {
+      if (player.clubId === 'free_agents') continue;
+
+      // Decrement contract duration
+      player.contractYearsLeft = Math.max(0, player.contractYearsLeft - 1);
+
+      if (player.contractYearsLeft === 0) {
+        // Contract has expired without renewal! Moves to Free Agent pool
+        const wasUserPlayer = player.clubId === this.state.userClubId;
+        player.clubId = 'free_agents';
+
+        expiredList.push({
+          id: player.id,
+          name: player.name,
+          age: player.age,
+          position: player.primaryPosition,
+          overall: player.overall,
+          wasUserPlayer
+        });
+
+        if (wasUserPlayer) {
+          // Remove from lineup
+          Object.keys(this.state.userLineup.startingXV).forEach(k => {
+            if (this.state.userLineup.startingXV[Number(k)] === player.id) {
+              delete this.state.userLineup.startingXV[Number(k)];
+            }
+          });
+          Object.keys(this.state.userLineup.bench).forEach(k => {
+            if (this.state.userLineup.bench[Number(k)] === player.id) {
+              delete this.state.userLineup.bench[Number(k)];
+            }
+          });
+
+          this.state.inbox.unshift({
+            id: `contract_exp_${player.id}_${Date.now()}`,
+            date: `Off-Season Year ${this.state.seasonYear}`,
+            sender: 'Director of Rugby',
+            subject: `⚠️ CONTRACT EXPIRED: ${player.name} is now a Free Agent!`,
+            body: `Contract Update Notice:\n\n${player.name} (${getPositionShort(player.primaryPosition)}, OVR ${player.overall}) has reached the expiration of his contract without an extension being finalized.\n\nHe has officially entered the Free Agent market. If you still wish to retain him, you can negotiate a new contract with him as an unattached free agent without paying any transfer fee.`,
+            category: 'TRANSFER',
+            read: false
+          });
+        }
+      }
+    }
+
+    return expiredList;
+  }
+
+  /**
+   * Calculates a player's annual Development Score (0 to 100) by comparing their
+   * actual seasonal statistics against their projected potential and current overall.
+   *
+   * Evaluates:
+   * 1. Match Involvement & Exposure (0-30 pts): Competitive reps are essential; lack of game time halts youth growth.
+   * 2. Performance Quality vs Expected Tier (0-35 pts): Standout average match ratings relative to current tier.
+   * 3. Role-Specific Contributions (0-20 pts): Tries, meters, turnovers, tackles, and discipline.
+   * 4. Work Ethic & Professionalism (0-15 pts): Driven by workRate and consistency attributes.
+   *
+   * Comparing actual stats against potential allows for unexpected breakthroughs (surging past projected ceiling)
+   * or stagnations in growth (lack of playing time or poor ratings stunting progress and lowering potential).
+   */
+  public calculateDevelopmentScore(player: Player): {
+    score: number;
+    verdict: 'BREAKTHROUGH' | 'RAPID_GROWTH' | 'STEADY' | 'STAGNATION' | 'DECLINE';
+    factors: {
+      matchExperience: number;
+      formRating: number;
+      keyContributions: number;
+      workEthic: number;
+    };
+    explanation: string;
+    stagnationReason?: string;
+  } {
+    const stats = player.stats || {
+      matchesPlayed: 0,
+      tries: 0,
+      conversions: 0,
+      penalties: 0,
+      points: 0,
+      tacklesMade: 0,
+      tacklesMissed: 0,
+      turnoversWon: 0,
+      metresCarried: 0,
+      yellowCards: 0,
+      redCards: 0,
+      avgRating: 7.0
+    };
+
+    // 1. Match Experience & Playing Time Factor (0-30 pts)
+    let matchExp = 0;
+    if (stats.matchesPlayed >= 14) matchExp = 30;
+    else if (stats.matchesPlayed >= 10) matchExp = 26;
+    else if (stats.matchesPlayed >= 6) matchExp = 20;
+    else if (stats.matchesPlayed >= 3) matchExp = 12;
+    else if (stats.matchesPlayed >= 1) matchExp = 6;
+    else matchExp = 0; // Bench warmer or zero competitive minutes
+
+    // 2. Form Rating vs Expected Potential Tier (0-35 pts)
+    let formScore = 0;
+    const avgRating = stats.avgRating || 7.0;
+    if (stats.matchesPlayed > 0) {
+      if (avgRating >= 8.2) formScore = 35;
+      else if (avgRating >= 7.8) formScore = 31;
+      else if (avgRating >= 7.4) formScore = 26;
+      else if (avgRating >= 7.0) formScore = 21;
+      else if (avgRating >= 6.5) formScore = 14;
+      else if (avgRating >= 6.0) formScore = 8;
+      else formScore = 3;
+
+      // Tier expectation comparison:
+      // A lower overall player who plays at an elite rating is punching way above their weight!
+      const expectedRatingForTier = 6.2 + ((player.overall - 50) / 50) * 1.6;
+      const ratingDelta = avgRating - expectedRatingForTier;
+      if (ratingDelta > 0.35) {
+        formScore = Math.min(35, formScore + 4);
+      } else if (ratingDelta < -0.35) {
+        formScore = Math.max(2, formScore - 4);
+      }
+    } else {
+      // If inactive, development depends on training workRate
+      formScore = player.attributes.workRate >= 80 ? 12 : 5;
+    }
+
+    // 3. Role Contributions & Discipline (0-20 pts)
+    const attackPts = (stats.tries || 0) * 2.5 + Math.min(6, (stats.metresCarried || 0) / 50);
+    const defPts = (stats.turnoversWon || 0) * 2.0 + Math.min(6, (stats.tacklesMade || 0) / 10);
+    const kickingPts = Math.min(4, (stats.points || 0) / 15);
+    const disciplinePenalty = (stats.yellowCards || 0) * 2 + (stats.redCards || 0) * 5;
+    const contributionScore = Math.max(0, Math.min(20, Math.round(attackPts + defPts + kickingPts - disciplinePenalty)));
+
+    // 4. Work Ethic & Professionalism (0-15 pts)
+    const workRate = player.attributes.workRate || 65;
+    const consistency = player.attributes.consistency || 65;
+    const workEthicScore = Math.min(15, Math.round((workRate * 0.1) + (consistency * 0.05)));
+
+    const rawScore = Math.min(100, Math.max(0, matchExp + formScore + contributionScore + workEthicScore));
+
+    // Determine Verdict based on Score, Age, and Headroom
+    const potentialHeadroom = player.potential - player.overall;
+    let verdict: 'BREAKTHROUGH' | 'RAPID_GROWTH' | 'STEADY' | 'STAGNATION' | 'DECLINE' = 'STEADY';
+    let explanation = '';
+    let stagnationReason: string | undefined = undefined;
+
+    if (player.age >= 31) {
+      verdict = 'DECLINE';
+      explanation = `Veteran physical decline with age ${player.age}, balanced by tactical consistency.`;
+    } else if (rawScore >= 76) {
+      // Exceeding expectations! Triggers Unexpected Breakthrough
+      verdict = 'BREAKTHROUGH';
+      explanation = `Sensational on-pitch campaign! Standout match ratings (${avgRating.toFixed(1)}) and heavy match involvement shattered expected development ceiling.`;
+    } else if (rawScore >= 62 && (potentialHeadroom > 0 || player.age <= 24)) {
+      verdict = 'RAPID_GROWTH';
+      explanation = `Strong development trajectory. Regular first-team minutes and positive impact accelerated attribute gains.`;
+    } else if (rawScore >= 45) {
+      verdict = 'STEADY';
+      explanation = `Steady seasonal progression meeting baseline expectations.`;
+    } else {
+      // Stagnation!
+      verdict = 'STAGNATION';
+      if (stats.matchesPlayed <= 2) {
+        stagnationReason = 'Severe lack of competitive first-team match minutes halted player growth.';
+      } else if (avgRating < 6.4) {
+        stagnationReason = `Sub-par on-field match performance (Avg Rating: ${avgRating.toFixed(1)}) stalled progression.`;
+      } else if (workRate < 60) {
+        stagnationReason = 'Low training application and work rate caused developmental plateau.';
+      } else {
+        stagnationReason = 'Underperformed expected potential baseline across seasonal fixtures.';
+      }
+      explanation = `Growth Stagnation: ${stagnationReason}`;
+    }
+
+    return {
+      score: rawScore,
+      verdict,
+      factors: {
+        matchExperience: matchExp,
+        formRating: formScore,
+        keyContributions: contributionScore,
+        workEthic: workEthicScore
+      },
+      explanation,
+      stagnationReason
+    };
+  }
+
+  /**
+   * Player Aging & Progression / Veteran Degradation Formula:
+   * Evaluates each player annually using their Development Score against their potential.
+   * Allows for unexpected breakthroughs (surging past projected ceiling)
+   * or stagnations in growth (lack of playing time or poor ratings stunting progress and lowering potential).
+   */
+  public evaluatePlayerAgingAndProgression(): {
+    breakoutPlayers: OffSeasonSummaryData['breakoutPlayers'];
+    stagnatedPlayers: NonNullable<OffSeasonSummaryData['stagnatedPlayers']>;
+    developmentReports: PlayerDevelopmentResult[];
+  } {
+    const breakoutPlayers: OffSeasonSummaryData['breakoutPlayers'] = [];
+    const stagnatedPlayers: NonNullable<OffSeasonSummaryData['stagnatedPlayers']> = [];
+    const developmentReports: PlayerDevelopmentResult[] = [];
+
+    for (const player of this.state.players) {
+      player.age += 1;
+
+      // Reset off-season conditioning
+      player.fatigue = 0;
+      player.fitness = 100;
+      if (player.injury) {
+        player.injury.weeksRemaining = Math.max(0, player.injury.weeksRemaining - 8);
+        if (player.injury.weeksRemaining <= 0) {
+          player.injury = null;
+        }
+      }
+
+      const oldPotential = player.potential;
+      const oldOverall = player.overall;
+
+      // Calculate annual Development Score
+      const dev = this.calculateDevelopmentScore(player);
+      player.developmentScore = dev.score;
+      player.developmentVerdict = dev.verdict;
+
+      if (player.age >= 31) {
+        // Veteran Degradation Formula:
+        // Physical speed, strength, and stamina decline realistically, but tactical awareness and consistency remain elite.
+        // If veteran had high development score (>= 60), decay is cushioned by match fitness.
+        const decayPoints = dev.score >= 60
+          ? 1
+          : player.age >= 35 ? Math.floor(Math.random() * 3) + 2 : Math.floor(Math.random() * 2) + 1;
+
+        player.attributes.speed = Math.max(45, player.attributes.speed - decayPoints);
+        player.attributes.fitness = Math.max(50, player.attributes.fitness - Math.floor(decayPoints * 0.8));
+        player.attributes.strength = Math.max(50, player.attributes.strength - Math.floor(decayPoints * 0.5));
+
+        // Mental attributes hold up
+        player.attributes.tacticalAwareness = Math.min(99, player.attributes.tacticalAwareness + 1);
+        player.attributes.consistency = Math.min(99, player.attributes.consistency + 1);
+
+        player.overall = Math.max(55, player.overall - Math.min(3, decayPoints));
+      } else {
+        switch (dev.verdict) {
+          case 'BREAKTHROUGH': {
+            // Unexpected Breakthrough: player shatters potential ceiling!
+            const potBoost = Math.floor(Math.random() * 3) + 2; // +2 to +4 potential
+            player.potential = Math.min(99, player.potential + potBoost);
+            const ovrGain = Math.min(player.potential - player.overall, Math.floor(Math.random() * 2) + 2); // +2 to +3
+            player.overall = Math.min(player.potential, player.overall + ovrGain);
+
+            player.attributes.speed = Math.min(99, player.attributes.speed + 2);
+            player.attributes.offloading = Math.min(99, player.attributes.offloading + 2);
+            player.attributes.passing = Math.min(99, player.attributes.passing + 2);
+            player.attributes.tacticalAwareness = Math.min(99, player.attributes.tacticalAwareness + 2);
+            player.attributes.workRate = Math.min(99, player.attributes.workRate + 2);
+
+            breakoutPlayers.push({
+              id: player.id,
+              name: player.name,
+              oldPotential,
+              newPotential: player.potential,
+              overall: player.overall,
+              wasUserPlayer: player.clubId === this.state.userClubId,
+              developmentScore: dev.score,
+              reason: dev.explanation
+            });
+
+            if (player.clubId === this.state.userClubId) {
+              this.state.inbox.unshift({
+                id: `breakout_${player.id}_${Date.now()}`,
+                date: `Off-Season Year ${this.state.seasonYear}`,
+                sender: 'Head of Analytics',
+                subject: `⭐ BREAKOUT PLAYER: ${player.name} breaks potential ceiling!`,
+                body: `Player Performance Breakthrough:\n\n${player.name} (Dev Score: ${dev.score}/100) demonstrated phenomenal on-field impact, shattering his previous ceiling!\n• Potential upgraded: ${oldPotential} ➔ ${player.potential}\n• Current Overall: ${player.overall} (+${ovrGain})\n• Development Verdict: Sensational Breakthrough\n\nHe is in prime condition to dominate next season!`,
+                category: 'SCOUTING',
+                read: false,
+                actionRoute: {
+                  screen: 'squad',
+                  targetEntityId: player.id,
+                  label: 'Inspect Breakout Star'
+                }
+              });
+            }
+            break;
+          }
+
+          case 'RAPID_GROWTH': {
+            const headroom = player.potential - player.overall;
+            const growth = Math.min(headroom, Math.floor(Math.random() * 2) + 2); // +2 or +3
+            if (growth > 0) {
+              player.overall += growth;
+              player.attributes.speed = Math.min(99, player.attributes.speed + 1);
+              player.attributes.strength = Math.min(99, player.attributes.strength + 1);
+              player.attributes.tacticalAwareness = Math.min(99, player.attributes.tacticalAwareness + 1);
+            }
+            break;
+          }
+
+          case 'STEADY': {
+            const headroom = player.potential - player.overall;
+            if (player.age <= 24 && headroom > 0) {
+              player.overall += 1;
+              player.attributes.tacticalAwareness = Math.min(99, player.attributes.tacticalAwareness + 1);
+            }
+            break;
+          }
+
+          case 'STAGNATION': {
+            // Unexpected Stagnation: lack of match exposure or sub-par ratings halts growth!
+            if (player.age <= 26 && player.potential > player.overall) {
+              const potDrop = Math.min(3, Math.max(1, Math.floor((45 - dev.score) / 10) + 1));
+              player.potential = Math.max(player.overall, player.potential - potDrop);
+
+              stagnatedPlayers.push({
+                id: player.id,
+                name: player.name,
+                age: player.age,
+                position: player.primaryPosition,
+                oldPotential,
+                newPotential: player.potential,
+                overall: player.overall,
+                wasUserPlayer: player.clubId === this.state.userClubId,
+                developmentScore: dev.score,
+                reason: dev.stagnationReason || dev.explanation
+              });
+
+              if (player.clubId === this.state.userClubId) {
+                this.state.inbox.unshift({
+                  id: `stagnate_${player.id}_${Date.now()}`,
+                  date: `Off-Season Year ${this.state.seasonYear}`,
+                  sender: 'Director of Rugby',
+                  subject: `⚠️ GROWTH STAGNATION: ${player.name} progression stalls`,
+                  body: `Player Development Alert:\n\n${player.name} (Dev Score: ${dev.score}/100) experienced an unexpected stagnation in growth this campaign.\n• Cause: ${dev.stagnationReason || 'Limited match exposure / below-par form'}\n• Matches Played: ${player.stats.matchesPlayed}\n• Average Rating: ${(player.stats.avgRating || 0).toFixed(1)}\n• Projected Potential: ${oldPotential} ➔ ${player.potential}\n• Current Overall: ${player.overall} (No growth)\n\nRecommendation: Provide regular first-team match minutes or assign a dedicated mentor to jumpstart his development next season.`,
+                  category: 'STAFF',
+                  read: false,
+                  actionRoute: {
+                    screen: 'squad',
+                    targetEntityId: player.id,
+                    label: 'Inspect Stagnated Player'
+                  }
+                });
+              }
+            }
+            break;
+          }
+        }
+      }
+
+      // Record detailed development report
+      developmentReports.push({
+        playerId: player.id,
+        playerName: player.name,
+        age: player.age,
+        position: player.primaryPosition,
+        clubId: player.clubId,
+        developmentScore: dev.score,
+        verdict: dev.verdict,
+        oldPotential,
+        newPotential: player.potential,
+        oldOverall,
+        newOverall: player.overall,
+        explanation: dev.explanation,
+        factors: dev.factors
+      });
+
+      // Recalculate market value & wages
+      recalculatePlayerRating(player);
+    }
+
+    return { breakoutPlayers, stagnatedPlayers, developmentReports };
+  }
+
+  /**
+   * Automated End-of-Season Processing:
+   * Smoothly transitions game_state from REGULAR_SEASON to OFF_SEASON when final fixture concludes.
+   * Archives tables, computes awards (MVP, Golden Boot, Top Try Scorer), pays prize money,
+   * generates ticket sales, runs 35+ retirements, handles expiring contracts, ages players,
+   * and prepares the Off-Season summary dashboard.
+   */
+  public processEndOfSeason(): OffSeasonSummaryData {
+    const userClub = this.state.clubs.find(c => c.id === this.state.userClubId);
+    const urcTable = this.state.leagueTables.URC || [];
+    const championClubId = urcTable[0]?.clubId || 'leinster';
+    const championClubName = this.state.clubs.find(c => c.id === championClubId)?.name || 'Leinster Rugby';
+    const champion = { id: championClubId, name: championClubName };
+    const userTableIndex = urcTable.findIndex(r => r.clubId === this.state.userClubId);
+    const userFinishPos = userTableIndex !== -1 ? userTableIndex + 1 : 8;
+
+    // 1. Season Awards
+    // Top Try Scorer
+    let topTryPlayer: Player = this.state.players[0];
+    let maxTries = -1;
+    this.state.players.forEach(p => {
+      if ((p.stats.tries || 0) > maxTries) {
+        maxTries = p.stats.tries;
+        topTryPlayer = p;
+      }
+    });
+
+    // Golden Boot (Points)
+    let goldenBootPlayer: Player = this.state.players[0];
+    let maxPoints = -1;
+    this.state.players.forEach(p => {
+      if ((p.stats.points || 0) > maxPoints) {
+        maxPoints = p.stats.points;
+        goldenBootPlayer = p;
+      }
+    });
+
+    // MVP (highest avg rating with >= 6 matches)
+    let mvpPlayer: Player = this.state.players[0];
+    let highestRating = -1;
+    this.state.players.forEach(p => {
+      if ((p.stats.matchesPlayed || 0) >= 6 && (p.stats.avgRating || 0) > highestRating) {
+        highestRating = p.stats.avgRating;
+        mvpPlayer = p;
+      }
+    });
+
+    const awards: SeasonAwards = {
+      seasonYear: this.state.seasonYear,
+      championClubId: champion.id,
+      championClubName: champion.name,
+      mvpPlayerId: mvpPlayer?.id || 'mvp_1',
+      mvpPlayerName: mvpPlayer?.name || 'Damian Willemse',
+      mvpClubName: this.state.clubs.find(c => c.id === mvpPlayer?.clubId)?.name || 'DHL Stormers',
+      mvpRating: highestRating > 0 ? highestRating : 8.6,
+      topTryScorerId: topTryPlayer?.id || 'try_1',
+      topTryScorerName: topTryPlayer?.name || 'Cheslin Kolbe',
+      topTryCount: maxTries > 0 ? maxTries : 12,
+      topTryClubName: this.state.clubs.find(c => c.id === topTryPlayer?.clubId)?.name || 'Tokyo Sungoliath',
+      goldenBootId: goldenBootPlayer?.id || 'boot_1',
+      goldenBootName: goldenBootPlayer?.name || 'Handré Pollard',
+      goldenBootPoints: maxPoints > 0 ? maxPoints : 148,
+      goldenBootClubName: this.state.clubs.find(c => c.id === goldenBootPlayer?.clubId)?.name || 'Leicester Tigers'
+    };
+
+    // 2. Financial Prize Money Payout based on league finish
+    let prizeMoney = 250000;
+    if (userFinishPos === 1) prizeMoney = 1500000;
+    else if (userFinishPos === 2) prizeMoney = 1000000;
+    else if (userFinishPos <= 4) prizeMoney = 750000;
+    else if (userFinishPos <= 8) prizeMoney = 500000;
+
+    // Season ticket sales revenue
+    const fanMultiplier = ((userClub?.fanSatisfaction ?? 80) / 100);
+    const seasonTicketRevenue = Math.round((userClub?.stadiumCapacity || 18000) * 0.65 * fanMultiplier * 320);
+
+    if (userClub) {
+      userClub.transferBudget += (prizeMoney + seasonTicketRevenue);
+      // Board evaluation adjustment
+      if (userFinishPos <= 4) {
+        userClub.boardConfidence = Math.min(100, userClub.boardConfidence + 12);
+        userClub.fanSatisfaction = Math.min(100, (userClub.fanSatisfaction ?? 80) + 10);
+      } else if (userFinishPos <= 8) {
+        userClub.boardConfidence = Math.min(100, userClub.boardConfidence + 4);
+      } else {
+        userClub.boardConfidence = Math.max(40, userClub.boardConfidence - 10);
+      }
+    }
+
+    // 3. Retirements (35+)
+    const retiredPlayers = this.evaluateRetirements();
+
+    // 4. Contract Expiries -> Free Agency
+    const expiredToFreeAgents = this.evaluateContractExpiries();
+
+    // 5. Player Aging, Veteran Decay, and Development Score Progression (Breakouts & Stagnations)
+    const { breakoutPlayers, stagnatedPlayers } = this.evaluatePlayerAgingAndProgression();
+
+    // 6. Youth Academy Intake / Draft (graduate 3-4 prospects)
+    const youthGraduates = this.generateYouthBatch(this.state.userClubId, 3).map(p => ({
+      id: p.id,
+      name: p.name,
+      position: p.primaryPosition,
+      age: p.age,
+      overall: p.overall,
+      potential: p.potential
+    }));
+
+    // 7. Save to season historical archives
+    if (!this.state.seasonArchives) this.state.seasonArchives = [];
+    this.state.seasonArchives.unshift({
+      seasonYear: this.state.seasonYear,
+      careerYear: this.state.careerYear,
+      championClubId: champion.id,
+      championClubName: champion.name,
+      userClubId: this.state.userClubId,
+      userFinishPosition: userFinishPos,
+      awards,
+      finalTable: JSON.parse(JSON.stringify(urcTable))
+    });
+
+    const offSeasonSummary: OffSeasonSummaryData = {
+      seasonYear: this.state.seasonYear,
+      nextSeasonYear: this.state.seasonYear + 1,
+      careerYear: this.state.careerYear,
+      champion,
+      userFinishPosition: userFinishPos,
+      prizeMoney,
+      seasonTicketRevenue,
+      boardSatisfaction: userClub?.boardConfidence ?? 85,
+      awards,
+      retiredPlayers,
+      expiredToFreeAgents,
+      youthGraduates,
+      breakoutPlayers,
+      stagnatedPlayers
+    };
+
+    if (userFinishPos === 1) {
+      const firstTrophy = (this.state.milestones || []).find(m => m.id === 'first_trophy');
+      if (firstTrophy && !firstTrophy.unlocked) {
+        firstTrophy.progress = 1;
+      }
+    }
+    this.checkMilestones();
+
+    this.state.lastOffSeasonSummary = offSeasonSummary;
+    this.state.seasonPhase = 'OFF_SEASON';
+
+    this.state.inbox.unshift({
+      id: `end_of_season_${this.state.seasonYear}_${Date.now()}`,
+      date: `Season ${this.state.seasonYear} Conclusion`,
+      sender: 'League Board & Operations',
+      subject: `🏆 SEASON ${this.state.seasonYear} CONCLUDED: Final Review & Off-Season Transition`,
+      body: `Season ${this.state.seasonYear} is officially in the books!\n\n• Champions: ${champion.name}\n• Your Finish: Position #${userFinishPos}\n• Prize Money Awarded: £${prizeMoney.toLocaleString()}\n• Season Ticket Renewals: £${seasonTicketRevenue.toLocaleString()}\n• Season MVP: ${awards.mvpPlayerName} (${awards.mvpClubName})\n• Top Try Scorer: ${awards.topTryScorerName} (${awards.topTryCount} tries)\n• Golden Boot: ${awards.goldenBootName} (${awards.goldenBootPoints} pts)\n\nProceed to the Pre-Season window to make dynamic transfers and re-sign free agents before kickoff!`,
+      category: 'BOARD',
+      read: false
+    });
+
+    this.notify();
+    return offSeasonSummary;
+  }
+
+  /**
+   * Transition to Pre-Season:
+   * Opens the transfer market for dynamic bidding, buyouts, and free agents.
+   */
+  public proceedToPreSeason(): void {
+    this.state.seasonPhase = 'PRE_SEASON';
+    this.state.isTransferWindowOpen = true; // Transfers active!
+
+    this.state.inbox.unshift({
+      id: `preseason_open_${Date.now()}`,
+      date: `Pre-Season ${this.state.seasonYear + 1}`,
+      sender: 'Director of Rugby',
+      subject: `🟢 PRE-SEASON TRANSFER WINDOW OPEN!`,
+      body: `Welcome to the Pre-Season transfer window for the upcoming ${this.state.seasonYear + 1} campaign!\n\n• The transfer market is OPEN for dynamic signings and rival buyouts.\n• Unattached Free Agents are available for signing.\n• Review expiring contracts and prepare your Starting XV.\n\nOnce you are ready, click "Kick Off Regular Season" to lock in squads and begin Round 1 fixtures.`,
+      category: 'TRANSFER',
+      read: false
+    });
+
+    this.notify();
+  }
+
+  /**
+   * Starts the New Season:
+   * Advances calendar year, rolls over fixtures, resets league table to 0-0,
+   * closes the transfer market (Free Agents only), and begins Round 1.
+   */
+  public startNewSeason(): void {
+    this.state.careerYear = Math.min(this.state.totalCareerYears, this.state.careerYear + 1);
+    this.state.seasonYear += 1;
+    this.state.currentRound = 1;
+    this.state.weekNumber = 1;
+    this.state.seasonPhase = 'REGULAR_SEASON';
+    this.state.isTransferWindowOpen = false; // Closed during regular season (Free agents only)
+
+    // Archive season stats to lastSeasonStats and reset current seasonal stats
+    this.state.players.forEach(p => {
+      p.lastSeasonStats = {
+        seasonId: `${this.state.seasonYear - 1}-${(this.state.seasonYear).toString().slice(2)}`,
+        seasonName: `${this.state.seasonYear - 1} URC Regular Season`,
+        matchesPlayed: p.stats.matchesPlayed,
+        tries: p.stats.tries,
+        conversions: p.stats.conversions,
+        penalties: p.stats.penalties,
+        dropGoals: p.stats.dropGoals,
+        points: p.stats.points,
+        tacklesMade: p.stats.tacklesMade,
+        tacklesMissed: p.stats.tacklesMissed,
+        turnoversWon: p.stats.turnoversWon,
+        metresCarried: p.stats.metresCarried,
+        yellowCards: p.stats.yellowCards,
+        redCards: p.stats.redCards,
+        avgRating: p.stats.avgRating || 7.0
+      };
+
+      p.stats = {
+        matchesPlayed: 0,
+        tries: 0,
+        conversions: 0,
+        penalties: 0,
+        dropGoals: 0,
+        points: 0,
+        tacklesMade: 0,
+        tacklesMissed: 0,
+        turnoversWon: 0,
+        metresCarried: 0,
+        yellowCards: 0,
+        redCards: 0,
+        avgRating: 7.0
+      };
+    });
+
+    // Regenerate fixtures and reset table for new season
+    const { fixtures, table } = generateFixturesForLeague(this.state.clubs, 'URC');
+    this.state.fixtures = fixtures;
+    this.state.leagueTables.URC = table;
+
+    // Recalculate ratings
+    recalculateBatchRatings(this.state.players);
+
+    this.state.inbox.unshift({
+      id: `season_kickoff_${this.state.seasonYear}_${Date.now()}`,
+      date: `Week 1, Season ${this.state.seasonYear}`,
+      sender: 'URC League Operations',
+      subject: `🏉 Season ${this.state.seasonYear} KICKS OFF! (Year ${this.state.careerYear} of ${this.state.totalCareerYears})`,
+      body: `The new URC Championship season is officially underway!\n\n• Transfer Market Status: CLOSED (Only Free Agents may be signed during the regular campaign)\n• Fixtures: 18 rounds generated\n• Current Round: Round 1\n\nGood luck Coach. Lead your team to the silverware!`,
+      category: 'BOARD',
+      read: false
+    });
+
+    this.notify();
+  }
+
   private saveToStorage() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
@@ -1947,9 +3146,34 @@ export class CareerManager {
             }
           }
 
-          // Ensure loaded players receive calibrated ratings going by current stats, last season stats, and potential
+          if (!parsed.seasonPhase) parsed.seasonPhase = 'REGULAR_SEASON';
+          if (!parsed.careerYear) parsed.careerYear = 1;
+          if (!parsed.totalCareerYears) parsed.totalCareerYears = 20;
+          if (parsed.isTransferWindowOpen === undefined) parsed.isTransferWindowOpen = parsed.seasonPhase === 'PRE_SEASON';
+          if (!parsed.seasonArchives) parsed.seasonArchives = [];
+
+          if (!parsed.milestones || parsed.milestones.length === 0) {
+            parsed.milestones = createDefaultMilestones();
+          } else {
+            const existingIds = new Set(parsed.milestones.map((m: any) => m.id));
+            createDefaultMilestones().forEach(dm => {
+              if (!existingIds.has(dm.id)) {
+                parsed.milestones.push(dm);
+              }
+            });
+          }
+
+          if (!parsed.statsStreak) {
+            parsed.statsStreak = { unbeaten: 0, homeWins: 0, totalMatches: 0, derbyWins: 0 };
+          }
+
+          // Ensure every loaded player and youth prospect has a MINIMUM of 2 positions they can play!
           if (parsed.players && Array.isArray(parsed.players)) {
+            parsed.players.forEach((p: Player) => ensurePlayerHasMinimumPositions(p));
             recalculateBatchRatings(parsed.players);
+          }
+          if (parsed.youthProspects && Array.isArray(parsed.youthProspects)) {
+            parsed.youthProspects.forEach((p: Player) => ensurePlayerHasMinimumPositions(p));
           }
         }
         return parsed;
@@ -1968,6 +3192,10 @@ export class CareerManager {
     try {
       const parsed = JSON.parse(json);
       if (parsed && parsed.userClubId && parsed.players) {
+        if (!parsed.milestones) parsed.milestones = createDefaultMilestones();
+        if (!parsed.statsStreak) parsed.statsStreak = { unbeaten: 0, homeWins: 0, totalMatches: 0, derbyWins: 0 };
+        parsed.players.forEach((p: Player) => ensurePlayerHasMinimumPositions(p));
+        if (parsed.youthProspects) parsed.youthProspects.forEach((p: Player) => ensurePlayerHasMinimumPositions(p));
         this.state = parsed;
         this.notify();
         return true;

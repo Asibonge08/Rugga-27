@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { RugbyMatchEngine } from '../services/matchEngine';
 import { MatchPitchCanvas } from './MatchPitchCanvas';
+import { TryAnimationOverlay, TryScoredEventData } from './TryAnimationOverlay';
 import { Club, Player, TacticsConfig, Fixture, PenaltyDecisionOption } from '../types/rugby';
 import { soundFx } from '../services/soundFx';
 import { getRivalry } from '../data/rugbyRivalries';
@@ -80,6 +81,8 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
   const [subToast, setSubToast] = useState<string | null>(null);
   const [injuryBenchPickerOpen, setInjuryBenchPickerOpen] = useState<boolean>(false);
   const [selectedPenaltyKickerId, setSelectedPenaltyKickerId] = useState<string | null>(null);
+  const [activeTryAnimation, setActiveTryAnimation] = useState<TryScoredEventData | null>(null);
+  const lastTryEventIdRef = useRef<string | null>(null);
 
   // Initialize engine once on mount
   useEffect(() => {
@@ -89,35 +92,41 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
       const lineup: Record<number, string> = {};
       for (let i = 1; i <= 15; i++) {
         if (healthySquad[i - 1]) lineup[i] = healthySquad[i - 1].id;
+        else if (squad[i - 1]) lineup[i] = squad[i - 1].id;
+        else if (squad[0]) lineup[i] = squad[0].id;
       }
       return lineup;
     };
 
-    // Sanitize user lineup: auto-replace any injured players with healthy reserves
-    const sanitizeLineup = (lineup: Record<number, string>, squad: Player[]) => {
-      const sanitized = { ...lineup };
+    // Sanitize user lineup: auto-replace any injured or missing players with healthy reserves
+    const sanitizeLineup = (lineup: Record<number, string> | undefined, squad: Player[]) => {
+      const sanitized: Record<number, string> = { ...(lineup || {}) };
       const healthySquad = squad.filter(p => !p.injury);
       const picked = new Set(Object.values(sanitized));
 
-      Object.entries(sanitized).forEach(([jerseyStr, pid]) => {
+      for (let i = 1; i <= 15; i++) {
+        const pid = sanitized[i];
         const p = squad.find(x => x.id === pid);
-        if (p && p.injury) {
-          picked.delete(p.id);
-          const replacement = healthySquad.find(c => !picked.has(c.id));
+        if (!p || p.injury) {
+          if (p) picked.delete(p.id);
+          const replacement = healthySquad.find(c => !picked.has(c.id)) ||
+                              squad.find(c => !picked.has(c.id)) ||
+                              healthySquad[0] ||
+                              squad[0];
           if (replacement) {
-            sanitized[Number(jerseyStr)] = replacement.id;
+            sanitized[i] = replacement.id;
             picked.add(replacement.id);
           }
         }
-      });
+      }
       return sanitized;
     };
 
     const homeLineup = homeClub.id === userClubId
-      ? sanitizeLineup(userLineup.startingXV, homeSquad)
+      ? sanitizeLineup(userLineup?.startingXV, homeSquad)
       : generateLineup(homeSquad);
     const awayLineup = awayClub.id === userClubId
-      ? sanitizeLineup(userLineup.startingXV, awaySquad)
+      ? sanitizeLineup(userLineup?.startingXV, awaySquad)
       : generateLineup(awaySquad);
 
     const defaultAITactics: TacticsConfig = {
@@ -143,6 +152,25 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
 
     newEngine.setOnUpdate((eng) => {
       setMatchState({ ...eng.state });
+
+      // Trigger interactive 2D canvas try animation overlay on try scored
+      const latestTry = eng.state.events.find(e => e.type === 'TRY');
+      if (latestTry && latestTry.id !== lastTryEventIdRef.current) {
+        lastTryEventIdRef.current = latestTry.id;
+        const scoringClub = latestTry.teamId === homeClub.id ? homeClub : awayClub;
+        const scorerPlayer = [...eng.homePlayers, ...eng.awayPlayers].find(p => p.id === latestTry.playerId);
+        setActiveTryAnimation({
+          scorerName: scorerPlayer?.name || 'Try Scorer',
+          scorerNumber: scorerPlayer?.number || 11,
+          teamId: scoringClub.id,
+          teamName: scoringClub.name,
+          teamColor: scoringClub.primaryColor || '#10B981',
+          minute: Math.floor(eng.state.matchMinute),
+          description: latestTry.description,
+          isRivalry: eng.state.isRivalryMatch
+        });
+      }
+
       if (eng.state.phase === 'FULL_TIME' && !showFullTimeModal) {
         handleMatchCompletion(eng);
       }
@@ -163,21 +191,26 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
   }, []);
 
   const handleMatchCompletion = (eng: RugbyMatchEngine) => {
-    const res = eng.instantSimulateToEnd();
-    setFinalResult(res);
-    setShowFullTimeModal(true);
+    try {
+      const res = eng.instantSimulateToEnd();
+      setFinalResult(res);
+      setShowFullTimeModal(true);
 
-    if (res) {
-      const userWon = (homeClub.id === userClubId && res.homeScore > res.awayScore) ||
-                       (awayClub.id === userClubId && res.awayScore > res.homeScore);
-      if (userWon) {
-        soundFx.playCrowdCheer();
-        try {
-          confetti({ particleCount: 70, spread: 60, origin: { y: 0.6 } });
-        } catch {
-          // ignore
+      if (res) {
+        const userWon = (homeClub.id === userClubId && res.homeScore > res.awayScore) ||
+                         (awayClub.id === userClubId && res.awayScore > res.homeScore);
+        if (userWon) {
+          soundFx.playCrowdCheer();
+          try {
+            confetti({ particleCount: 70, spread: 60, origin: { y: 0.6 } });
+          } catch {
+            // ignore
+          }
         }
       }
+    } catch (err) {
+      console.error('Error in handleMatchCompletion:', err);
+      setShowFullTimeModal(true);
     }
   };
 
@@ -200,11 +233,16 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
 
   const handleInstantSim = () => {
     if (!engine) return;
-    engine.pause();
-    const res = engine.instantSimulateToEnd();
-    setFinalResult(res);
-    setMatchState({ ...engine.state });
-    setShowFullTimeModal(true);
+    try {
+      engine.pause();
+      const res = engine.instantSimulateToEnd();
+      setFinalResult(res);
+      setMatchState({ ...engine.state });
+      setShowFullTimeModal(true);
+    } catch (err) {
+      console.error('Error during handleInstantSim:', err);
+      setShowFullTimeModal(true);
+    }
   };
 
   const handleToggleSound = () => {
@@ -378,7 +416,7 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
                 📋 Queued Substitution{queuedSubstitutions.length > 1 ? 's' : ''} (Coming on at next stoppage)
               </span>
               <div className="flex flex-wrap gap-2 text-xs text-neutral-200 mt-1">
-                {queuedSubstitutions.map(sub => (
+                {queuedSubstitutions.map((sub: any) => (
                   <span key={sub.id} className="bg-black/40 px-2.5 py-1 rounded-lg border border-amber-500/30 flex items-center space-x-2">
                     <span className="font-semibold text-emerald-300">{sub.onPlayerName}</span>
                     <span className="text-neutral-400">for</span>
@@ -754,7 +792,7 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
                       let compatibilityBadge = 'BENCH RESERVE';
                       let badgeColor = 'bg-neutral-800 text-neutral-300';
 
-                      if (eligibility) {
+                      if (eligibility && targetPos) {
                         if (eligibility.isPrimary) {
                           compatibilityBadge = `BENCH – CAN PLAY ${getPositionShort(targetPos)}`;
                           badgeColor = 'bg-emerald-950 text-emerald-300 border border-emerald-500/50';
@@ -998,7 +1036,7 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
             {/* Kicker Selector for Posts Option */}
             {(() => {
               const activeKicker = pendingPenaltyDecision.availableKickers.find(
-                k => k.playerId === (selectedPenaltyKickerId || pendingPenaltyDecision.availableKickers[0]?.playerId)
+                (k: any) => k.playerId === (selectedPenaltyKickerId || pendingPenaltyDecision.availableKickers[0]?.playerId)
               ) || pendingPenaltyDecision.availableKickers[0];
 
               return (
@@ -1025,7 +1063,7 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
                           onChange={(e) => setSelectedPenaltyKickerId(e.target.value)}
                           className="bg-neutral-900 border border-neutral-700 text-neutral-200 text-xs rounded-lg p-1.5 focus:outline-none focus:border-emerald-500"
                         >
-                          {pendingPenaltyDecision.availableKickers.map(k => (
+                          {pendingPenaltyDecision.availableKickers.map((k: any) => (
                             <option key={k.playerId} value={k.playerId}>
                               #{k.number} {k.name} ({k.successChance}%)
                             </option>
@@ -1215,6 +1253,13 @@ export const MatchdayView: React.FC<MatchdayViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* 2D Keyframe Canvas Try Scored Celebratory Overlay */}
+      <TryAnimationOverlay
+        isOpen={!!activeTryAnimation}
+        tryData={activeTryAnimation}
+        onClose={() => setActiveTryAnimation(null)}
+      />
     </div>
   );
 };

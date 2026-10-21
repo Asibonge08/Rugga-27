@@ -123,6 +123,7 @@ export const PlayerProfileModal: React.FC<PlayerProfileModalProps> = ({
   const ratingTier = getRatingTier(player.overall);
   const perfBreakdown = player.ratingBreakdown || ratingData.breakdown;
   const ratingDelta = perfBreakdown.overallDelta;
+  const devReport = careerManager.calculateDevelopmentScore(player);
 
   const handleRecalculateRating = () => {
     soundFx.playWhistle('short');
@@ -463,6 +464,141 @@ export const PlayerProfileModal: React.FC<PlayerProfileModalProps> = ({
                     </div>
                   </div>
                 )}
+              </div>
+
+              {/* Annual Development Score & Growth Trajectory Card */}
+              <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <div className="flex items-center space-x-2">
+                    <Target className="w-4 h-4 text-emerald-400" />
+                    <div>
+                      <h4 className="font-heading font-bold text-sm text-white uppercase tracking-wide">
+                        Annual Development Score & Growth Potential
+                      </h4>
+                      <p className="text-[11px] text-neutral-400">
+                        Evaluates seasonal stats vs {player.potential} POT ceiling to drive off-season breakthroughs or stagnations.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center space-x-2 self-start sm:self-auto font-mono-numbers">
+                    <div className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-700 flex items-center space-x-1.5">
+                      <span className="text-[10px] text-neutral-400 uppercase font-sans">Score:</span>
+                      <span className={`text-sm font-black ${
+                        devReport.score >= 76 ? 'text-emerald-400' :
+                        devReport.score >= 62 ? 'text-blue-400' :
+                        devReport.score >= 45 ? 'text-neutral-200' : 'text-amber-400'
+                      }`}>
+                        {devReport.score}/100
+                      </span>
+                    </div>
+
+                    <span className={`px-2 py-1 rounded-lg text-[10px] font-heading font-bold uppercase tracking-wider border ${
+                      devReport.verdict === 'BREAKTHROUGH' ? 'bg-emerald-950 text-emerald-300 border-emerald-500/50' :
+                      devReport.verdict === 'RAPID_GROWTH' ? 'bg-blue-950 text-blue-300 border-blue-500/50' :
+                      devReport.verdict === 'STEADY' ? 'bg-neutral-900 text-neutral-300 border-neutral-700' :
+                      devReport.verdict === 'STAGNATION' ? 'bg-amber-950 text-amber-300 border-amber-500/50' :
+                      'bg-rose-950 text-rose-300 border-rose-500/50'
+                    }`}>
+                      {devReport.verdict === 'BREAKTHROUGH' ? '⭐ Breakthrough' :
+                       devReport.verdict === 'RAPID_GROWTH' ? '🚀 Rapid Growth' :
+                       devReport.verdict === 'STEADY' ? '📈 Steady Progress' :
+                       devReport.verdict === 'STAGNATION' ? '⚠️ Stagnation Risk' : '⏳ Veteran Decay'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 4 Factor Pillar Gauges */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono-numbers">
+                  {/* Factor 1: Match Experience */}
+                  <div className="p-2.5 rounded-lg bg-neutral-900/80 border border-neutral-800">
+                    <div className="flex items-center justify-between text-[10px] text-neutral-400 mb-1 font-sans">
+                      <span>Match Reps</span>
+                      <span className="font-mono-numbers font-bold text-neutral-300">{devReport.factors.matchExperience}/30</span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                      <div
+                        className="h-full bg-emerald-500 rounded-full"
+                        style={{ width: `${(devReport.factors.matchExperience / 30) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-[10px] text-neutral-500 mt-1 block truncate">
+                      {player.stats.matchesPlayed} caps this year
+                    </span>
+                  </div>
+
+                  {/* Factor 2: Form vs Potential */}
+                  <div className="p-2.5 rounded-lg bg-neutral-900/80 border border-neutral-800">
+                    <div className="flex items-center justify-between text-[10px] text-neutral-400 mb-1 font-sans">
+                      <span>Rating Form</span>
+                      <span className="font-mono-numbers font-bold text-neutral-300">{devReport.factors.formRating}/35</span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                      <div
+                        className="h-full bg-blue-500 rounded-full"
+                        style={{ width: `${(devReport.factors.formRating / 35) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-[10px] text-neutral-500 mt-1 block truncate">
+                      Avg: {player.stats.avgRating || 7.0} / 10
+                    </span>
+                  </div>
+
+                  {/* Factor 3: Key Contributions */}
+                  <div className="p-2.5 rounded-lg bg-neutral-900/80 border border-neutral-800">
+                    <div className="flex items-center justify-between text-[10px] text-neutral-400 mb-1 font-sans">
+                      <span>Involvements</span>
+                      <span className="font-mono-numbers font-bold text-neutral-300">{devReport.factors.keyContributions}/20</span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                      <div
+                        className="h-full bg-amber-500 rounded-full"
+                        style={{ width: `${(devReport.factors.keyContributions / 20) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-[10px] text-neutral-500 mt-1 block truncate">
+                      Tackles, Tries & Rucks
+                    </span>
+                  </div>
+
+                  {/* Factor 4: Work Ethic */}
+                  <div className="p-2.5 rounded-lg bg-neutral-900/80 border border-neutral-800">
+                    <div className="flex items-center justify-between text-[10px] text-neutral-400 mb-1 font-sans">
+                      <span>Work Ethic</span>
+                      <span className="font-mono-numbers font-bold text-neutral-300">{devReport.factors.workEthic}/15</span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                      <div
+                        className="h-full bg-purple-500 rounded-full"
+                        style={{ width: `${(devReport.factors.workEthic / 15) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-[10px] text-neutral-500 mt-1 block truncate">
+                      Work Rate: {player.attributes.workRate}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Analytical Verdict Note */}
+                <div className={`p-2.5 rounded-lg text-xs border ${
+                  devReport.verdict === 'BREAKTHROUGH' ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-200' :
+                  devReport.verdict === 'RAPID_GROWTH' ? 'bg-blue-950/30 border-blue-800/40 text-blue-200' :
+                  devReport.verdict === 'STAGNATION' ? 'bg-amber-950/30 border-amber-800/40 text-amber-200' :
+                  devReport.verdict === 'DECLINE' ? 'bg-rose-950/30 border-rose-800/40 text-rose-200' :
+                  'bg-neutral-900 border-neutral-800 text-neutral-300'
+                }`}>
+                  <span className="font-semibold block">{devReport.explanation}</span>
+                  {devReport.verdict === 'STAGNATION' && (
+                    <span className="text-[11px] text-amber-300/80 mt-1 block">
+                      ⚠️ Coach Warning: Young players with sub-par minutes or low ratings face potential ceiling degradation during off-season processing.
+                    </span>
+                  )}
+                  {devReport.verdict === 'BREAKTHROUGH' && (
+                    <span className="text-[11px] text-emerald-300/80 mt-1 block">
+                      ⭐ Scouting Intel: Standout performances will permanently boost his potential attribute ceiling in the off-season!
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* Multi-Season Performance Matrix Table */}

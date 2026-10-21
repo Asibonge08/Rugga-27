@@ -7,7 +7,7 @@ import { urcRegistry } from '../services/urcRegistryService';
 import { PlayerProfileModal } from './PlayerProfileModal';
 import { PlayerEditorModal } from './PlayerEditorModal';
 import { careerManager } from '../services/careerManager';
-import { Search, DollarSign, ArrowRightLeft, Shield, Check, X, Filter, Database, Sparkles, ExternalLink, Calendar, Info, Sliders } from 'lucide-react';
+import { Search, DollarSign, ArrowRightLeft, Shield, Check, X, Filter, Database, Sparkles, ExternalLink, Calendar, Info, Sliders, AlertTriangle } from 'lucide-react';
 
 interface TransfersViewProps {
   players: Player[];
@@ -26,12 +26,15 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
 }) => {
   const userClub = clubs.find(c => c.id === userClubId) || clubs[0];
   const { formatMoney, effectiveCurrency } = useCurrency(userClub.country);
-  const [activeTab, setActiveTab] = useState<'market' | 'discovery' | 'mysquad'>('market');
+  const careerState = careerManager.getState();
+  const isTransferWindowOpen = careerState.isTransferWindowOpen ?? (careerState.seasonPhase === 'PRE_SEASON');
+  const [activeTab, setActiveTab] = useState<'market' | 'freeagents' | 'discovery' | 'mysquad'>('market');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [positionFilter, setPositionFilter] = useState<string>('ALL');
   const [countryFilter, setCountryFilter] = useState<string>('ALL');
   const [negotiatingPlayer, setNegotiatingPlayer] = useState<Player | null>(null);
   const [sellingPlayer, setSellingPlayer] = useState<Player | null>(null);
+  const [renewingPlayer, setRenewingPlayer] = useState<Player | null>(null);
 
   // Official URC Discovery state
   const [discoverySeason, setDiscoverySeason] = useState<SeasonId>('2025-26');
@@ -48,14 +51,45 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
   const [bidRole, setBidRole] = useState<Player['squadRole']>('First XV');
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; isError: boolean } | null>(null);
 
+  // Renewal fields
+  const [renewWage, setRenewWage] = useState<number>(0);
+  const [renewYears, setRenewYears] = useState<number>(3);
+  const [renewRole, setRenewRole] = useState<Player['squadRole']>('First XV');
+  const [renewFeedback, setRenewFeedback] = useState<{ text: string; isError: boolean } | null>(null);
+
   const handleOpenNegotiation = (p: Player) => {
     soundFx.playClick();
     setNegotiatingPlayer(p);
-    setBidFee(p.marketValue);
+    const isFreeAgent = p.clubId === 'free_agents';
+    setBidFee(isFreeAgent ? 0 : p.marketValue);
     setBidWage(Math.round(p.weeklyWage * 1.15));
     setBidYears(3);
     setBidRole('First XV');
     setFeedbackMsg(null);
+  };
+
+  const handleOpenRenewal = (p: Player) => {
+    soundFx.playClick();
+    setRenewingPlayer(p);
+    setRenewWage(Math.round(p.weeklyWage * 1.10));
+    setRenewYears(Math.min(5, (p.contractYearsLeft || 1) + 2));
+    setRenewRole(p.squadRole || 'First XV');
+    setRenewFeedback(null);
+  };
+
+  const handleConfirmRenewal = () => {
+    if (!renewingPlayer) return;
+    const res = careerManager.renewPlayerContract(renewingPlayer.id, renewWage, renewYears, renewRole);
+    if (res.success) {
+      soundFx.playCrowdCheer();
+      setRenewFeedback({ text: res.message, isError: false });
+      setTimeout(() => {
+        setRenewingPlayer(null);
+        setRenewFeedback(null);
+      }, 1400);
+    } else {
+      setRenewFeedback({ text: res.message, isError: true });
+    }
   };
 
   const handleConfirmBid = () => {
@@ -82,9 +116,18 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
     }
   };
 
-  // Filter market players (exclude user club players)
+  // Filter market players (exclude user club players and free agents)
   const marketPlayers = players.filter(p => {
-    if (p.clubId === userClubId) return false;
+    if (p.clubId === userClubId || p.clubId === 'free_agents') return false;
+    if (searchQuery && !p.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+    if (positionFilter !== 'ALL' && p.primaryPosition !== positionFilter) return false;
+    if (countryFilter !== 'ALL' && p.nationality !== countryFilter) return false;
+    return true;
+  });
+
+  // Free Agents Pool
+  const freeAgentPlayers = players.filter(p => {
+    if (p.clubId !== 'free_agents') return false;
     if (searchQuery && !p.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
     if (positionFilter !== 'ALL' && p.primaryPosition !== positionFilter) return false;
     if (countryFilter !== 'ALL' && p.nationality !== countryFilter) return false;
@@ -102,11 +145,39 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
 
   return (
     <div className="space-y-4 pb-12">
-      {/* Top Banner: Club Budget Glance */}
+      {/* Transfer Window Status Banner */}
+      <div className={`p-3.5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-lg ${
+        isTransferWindowOpen
+          ? 'bg-gradient-to-r from-emerald-950/80 via-neutral-900 to-emerald-950/40 border-emerald-500/40'
+          : 'bg-gradient-to-r from-neutral-900 via-neutral-900 to-amber-950/40 border-neutral-800'
+      }`}>
+        <div className="flex items-center space-x-3">
+          <div className={`w-3.5 h-3.5 rounded-full ${isTransferWindowOpen ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+          <div>
+            <div className="font-heading font-bold text-sm text-white flex items-center space-x-2">
+              <span>{isTransferWindowOpen ? '🟢 PRE-SEASON TRANSFER WINDOW OPEN' : '🔴 REGULAR SEASON: TRANSFER WINDOW CLOSED'}</span>
+              <span className="text-[10px] px-2 py-0.5 rounded font-mono-numbers bg-neutral-800 text-neutral-300">
+                Season {careerState.seasonYear}
+              </span>
+            </div>
+            <p className="text-xs text-neutral-400 mt-0.5">
+              {isTransferWindowOpen
+                ? 'Full dynamic transfer bidding, rival club buyouts, and free agents are currently active.'
+                : 'Club-to-club transfers are closed. You can only sign unattached Free Agents (£0 fee) during the season.'}
+            </p>
+          </div>
+        </div>
+
+        <div className="text-xs font-medium px-3 py-1.5 rounded-xl bg-neutral-950/70 border border-neutral-800 text-neutral-300 shrink-0">
+          Phase: <span className="text-emerald-400 font-semibold">{careerState.seasonPhase}</span>
+        </div>
+      </div>
+
+      {/* Club Budget Glance */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-neutral-900 border border-neutral-800 p-4 rounded-2xl shadow-xl">
         <div>
           <h2 className="font-heading font-bold text-lg text-white">Transfer Market & Contracts</h2>
-          <p className="text-xs text-neutral-400">Scout, negotiate bids, and register elite rugby union players</p>
+          <p className="text-xs text-neutral-400">Scout, negotiate contracts, and manage squad departures</p>
         </div>
 
         <div className="flex items-center space-x-4 bg-neutral-950 p-2.5 rounded-xl border border-neutral-800 text-xs">
@@ -143,13 +214,26 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
         <button
           onClick={() => {
             soundFx.playClick();
+            setActiveTab('freeagents');
+          }}
+          className={`px-4 py-2 rounded-xl text-xs font-semibold cursor-pointer transition-all flex items-center space-x-1.5 ${
+            activeTab === 'freeagents' ? 'bg-emerald-600 text-white shadow-md' : 'bg-neutral-900 text-neutral-400 hover:text-white'
+          }`}
+        >
+          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+          <span>Free Agents ({freeAgentPlayers.length})</span>
+        </button>
+
+        <button
+          onClick={() => {
+            soundFx.playClick();
             setActiveTab('discovery');
           }}
           className={`px-4 py-2 rounded-xl text-xs font-semibold cursor-pointer transition-all flex items-center space-x-1.5 ${
             activeTab === 'discovery' ? 'bg-emerald-600 text-white shadow-md' : 'bg-neutral-900 text-neutral-400 hover:text-white'
           }`}
         >
-          <Database className="w-3.5 h-3.5 text-amber-400" />
+          <Database className="w-3.5 h-3.5 text-blue-400" />
           <span>Official URC Discovery ({discoveryPlayers.length})</span>
         </button>
 
@@ -162,7 +246,7 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
             activeTab === 'mysquad' ? 'bg-emerald-600 text-white shadow-md' : 'bg-neutral-900 text-neutral-400 hover:text-white'
           }`}
         >
-          Squad Outgoing / Sell ({mySquadPlayers.length})
+          Squad Contracts & Sales ({mySquadPlayers.length})
         </button>
       </div>
 
@@ -261,6 +345,113 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* FREE AGENTS TAB */}
+      {activeTab === 'freeagents' && (
+        <div className="space-y-4">
+          <div className="p-3.5 rounded-xl bg-gradient-to-r from-emerald-950/40 via-neutral-900 to-amber-950/30 border border-emerald-500/30 flex items-center justify-between text-xs">
+            <div className="flex items-center space-x-2.5">
+              <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+              <div>
+                <span className="font-heading font-bold text-white">Unattached Free Agents Market</span>
+                <p className="text-[11px] text-neutral-400">
+                  Free agents can be signed anytime across the season without transfer fees, even when the transfer window is closed!
+                </p>
+              </div>
+            </div>
+            <span className="text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 font-mono-numbers font-bold">
+              {freeAgentPlayers.length} Available
+            </span>
+          </div>
+
+          {/* Filters Bar */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-neutral-900 border border-neutral-800 p-3 rounded-xl text-xs">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+              <input
+                type="text"
+                placeholder="Search free agents..."
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                className="w-full pl-8 pr-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-xs text-neutral-200 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+
+            <select
+              value={positionFilter}
+              onChange={e => setPositionFilter(e.target.value)}
+              className="w-full p-2 rounded-lg bg-neutral-950 border border-neutral-800 text-xs text-neutral-200 focus:outline-none focus:border-emerald-500"
+            >
+              <option value="ALL">All Positions</option>
+              {POSITIONS_ORDER.map(pos => (
+                <option key={pos} value={pos}>{getPositionName(pos)}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Free Agents Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {freeAgentPlayers.map(p => (
+              <div
+                key={p.id}
+                className="rounded-xl bg-neutral-900 border border-neutral-800 p-4 flex flex-col justify-between shadow-md hover:border-emerald-500/50 transition-all group"
+              >
+                <div>
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="flex items-center space-x-2">
+                      <div className="w-9 h-9 rounded-lg bg-neutral-800 border border-neutral-700 flex items-center justify-center font-heading font-black text-xs text-white shrink-0">
+                        {getPositionShort(p.primaryPosition)}
+                      </div>
+                      <div>
+                        <div className="font-heading font-bold text-sm text-neutral-100 group-hover:text-emerald-400 transition-colors">
+                          {p.name}
+                        </div>
+                        <div className="text-[11px] text-neutral-400 font-mono-numbers">
+                          Free Agent · Age {p.age} · {p.nationality}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="text-xs font-mono-numbers text-emerald-400 font-bold block">
+                        OVR {p.overall}
+                      </span>
+                      <div className="text-[10px] text-amber-400 font-mono-numbers">
+                        POT {p.potential}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px] font-mono-numbers p-2 rounded-lg bg-neutral-950 mb-3 border border-neutral-800/60">
+                    <div>
+                      <span className="text-neutral-500 text-[10px] block font-sans uppercase">Transfer Fee</span>
+                      <span className="text-emerald-400 font-bold">FREE (£0)</span>
+                    </div>
+                    <div>
+                      <span className="text-neutral-500 text-[10px] block font-sans uppercase">Expected Wage</span>
+                      <span className="text-neutral-200">{formatMoney(p.weeklyWage, { perWeek: true })}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => handleOpenNegotiation(p)}
+                  className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs tracking-wide flex items-center justify-center space-x-1.5 transition-all cursor-pointer shadow-md"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Negotiate Contract (Free Agent)</span>
+                </button>
+              </div>
+            ))}
+
+            {freeAgentPlayers.length === 0 && (
+              <div className="col-span-full py-12 text-center text-neutral-500 text-xs">
+                No free agents matching criteria. At the end of each season, unrenewed players transition to free agency.
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -417,35 +608,170 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
         </div>
       )}
 
-      {/* SQUAD OUTGOING / SELL TAB */}
+      {/* SQUAD CONTRACTS & SALES TAB */}
       {activeTab === 'mysquad' && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {mySquadPlayers.map(p => (
-            <div
-              key={p.id}
-              className="rounded-xl bg-neutral-900 border border-neutral-800 p-3.5 flex flex-col justify-between shadow-md"
-            >
-              <div>
-                <div className="flex justify-between items-start mb-2">
-                  <div>
-                    <div className="font-heading font-bold text-sm text-neutral-100">{p.name}</div>
-                    <div className="text-[11px] text-neutral-400">{getPositionName(p.primaryPosition)} · {p.age} y/o</div>
+          {mySquadPlayers.map(p => {
+            const yearsLeft = p.contractYearsLeft ?? 2;
+            const isExpiring = yearsLeft <= 1;
+
+            return (
+              <div
+                key={p.id}
+                className={`rounded-xl bg-neutral-900 border p-3.5 flex flex-col justify-between shadow-md transition-all ${
+                  isExpiring ? 'border-amber-500/60 shadow-amber-950/20' : 'border-neutral-800'
+                }`}
+              >
+                <div>
+                  <div className="flex justify-between items-start mb-2">
+                    <div>
+                      <div className="font-heading font-bold text-sm text-neutral-100">{p.name}</div>
+                      <div className="text-[11px] text-neutral-400">{getPositionName(p.primaryPosition)} · Age {p.age}</div>
+                    </div>
+                    <span className="text-xs font-mono-numbers text-emerald-400 font-bold">OVR {p.overall}</span>
                   </div>
-                  <span className="text-xs font-mono-numbers text-emerald-400 font-bold">OVR {p.overall}</span>
+
+                  <div className="p-2.5 rounded-lg bg-neutral-950 text-xs font-mono-numbers space-y-1 mb-3">
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500 font-sans">Market Value</span>
+                      <span className="text-neutral-200">{formatMoney(p.marketValue, { compact: true })}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500 font-sans">Weekly Wage</span>
+                      <span className="text-neutral-200">{formatMoney(p.weeklyWage, { perWeek: true })}</span>
+                    </div>
+                    <div className="flex justify-between pt-1 border-t border-neutral-800/70">
+                      <span className="text-neutral-500 font-sans">Contract Duration</span>
+                      <span className={`font-bold ${isExpiring ? 'text-amber-400' : 'text-emerald-400'}`}>
+                        {yearsLeft} Year{yearsLeft !== 1 ? 's' : ''} Remaining
+                      </span>
+                    </div>
+                  </div>
+
+                  {isExpiring && (
+                    <div className="mb-3 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[10px] text-amber-300 flex items-center space-x-1.5">
+                      <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
+                      <span>Contract expiring! Renew to avoid Free Agency loss.</span>
+                    </div>
+                  )}
                 </div>
-                <div className="text-xs font-mono-numbers text-neutral-300 mb-3">
-                  Market Value: {formatMoney(p.marketValue, { compact: true })} · Wage: {formatMoney(p.weeklyWage, { perWeek: true })}
+
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => handleOpenRenewal(p)}
+                    className="flex-1 py-2 px-2.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 text-white text-xs font-bold tracking-wide flex items-center justify-center space-x-1 cursor-pointer shadow-md"
+                  >
+                    <span>Renew Contract</span>
+                  </button>
+                  <button
+                    onClick={() => setSellingPlayer(p)}
+                    className="py-2 px-2.5 rounded-lg bg-neutral-800 hover:bg-red-950/60 border border-neutral-700 hover:border-red-800 text-neutral-300 hover:text-red-300 font-medium text-xs cursor-pointer transition-colors"
+                  >
+                    List Sale
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* CONTRACT RENEWAL MODAL */}
+      {renewingPlayer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
+          <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-2xl p-5 text-neutral-100 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-neutral-800 mb-4">
+              <div>
+                <h3 className="font-heading font-bold text-base text-white">Contract Renewal Negotiation</h3>
+                <p className="text-xs text-neutral-400">{renewingPlayer.name} ({getPositionShort(renewingPlayer.primaryPosition)}, Age {renewingPlayer.age})</p>
+              </div>
+              <button
+                onClick={() => setRenewingPlayer(null)}
+                className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 mb-5 text-xs">
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-neutral-400 uppercase font-semibold text-[10px]">
+                    Offered Weekly Salary
+                  </label>
+                  <span className="font-heading font-bold text-emerald-400 font-mono-numbers">
+                    {formatMoney(renewWage, { perWeek: true })}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={Math.round(renewingPlayer.weeklyWage * 0.75)}
+                  max={Math.round(renewingPlayer.weeklyWage * 2.2)}
+                  step={250}
+                  value={renewWage}
+                  onChange={e => setRenewWage(Number(e.target.value))}
+                  className="w-full accent-emerald-500 cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] text-neutral-500 font-mono-numbers mt-0.5">
+                  <span>Current: {formatMoney(renewingPlayer.weeklyWage, { perWeek: true })}</span>
+                  <span>Annual: {formatMoney(renewWage * 52, { compact: true })}</span>
                 </div>
               </div>
 
-              <button
-                onClick={() => setSellingPlayer(p)}
-                className="w-full py-2 px-3 rounded-lg bg-red-950/60 hover:bg-red-900/60 border border-red-800/60 text-red-300 font-medium text-xs tracking-wide cursor-pointer"
-              >
-                List for Transfer ({formatMoney(p.marketValue, { compact: true })})
-              </button>
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-neutral-400 uppercase font-semibold text-[10px]">
+                    Contract Duration (Years)
+                  </label>
+                  <span className="font-heading font-bold text-white font-mono-numbers">
+                    {renewYears} Year{renewYears > 1 ? 's' : ''} (Expires {careerState.seasonYear + renewYears})
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={1}
+                  max={5}
+                  step={1}
+                  value={renewYears}
+                  onChange={e => setRenewYears(Number(e.target.value))}
+                  className="w-full accent-emerald-500 cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <label className="block text-neutral-400 uppercase font-semibold text-[10px] mb-1">
+                  Squad Role Promise
+                </label>
+                <select
+                  value={renewRole}
+                  onChange={e => setRenewRole(e.target.value as any)}
+                  className="w-full p-2.5 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-200 text-xs"
+                >
+                  <option value="Key Player">Key Player</option>
+                  <option value="First XV">First XV</option>
+                  <option value="Squad Rotation">Squad Rotation</option>
+                  <option value="Youth Prospect">Youth Prospect</option>
+                </select>
+              </div>
+
+              {renewFeedback && (
+                <div className={`p-2.5 rounded-lg text-xs font-semibold ${
+                  renewFeedback.isError
+                    ? 'bg-rose-950/60 text-rose-300 border border-rose-800/80'
+                    : 'bg-emerald-950/60 text-emerald-300 border border-emerald-800/80'
+                }`}>
+                  {renewFeedback.text}
+                </div>
+              )}
             </div>
-          ))}
+
+            <button
+              onClick={handleConfirmRenewal}
+              className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-heading font-bold text-sm tracking-wide shadow-lg cursor-pointer"
+            >
+              OFFER CONTRACT EXTENSION
+            </button>
+          </div>
         </div>
       )}
 
@@ -455,8 +781,12 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
           <div className="w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-2xl p-5 sm:p-6 text-neutral-100 shadow-2xl animate-in fade-in">
             <div className="flex items-center justify-between pb-3 border-b border-neutral-800 mb-4">
               <div>
-                <h3 className="font-heading font-bold text-base text-white">Transfer Negotiation</h3>
-                <p className="text-xs text-neutral-400">{negotiatingPlayer.name} ({negotiatingPlayer.primaryPosition})</p>
+                <h3 className="font-heading font-bold text-base text-white">
+                  {negotiatingPlayer.clubId === 'free_agents' ? 'Free Agent Signing' : 'Transfer Negotiation'}
+                </h3>
+                <p className="text-xs text-neutral-400">
+                  {negotiatingPlayer.name} ({getPositionShort(negotiatingPlayer.primaryPosition)}, Age {negotiatingPlayer.age})
+                </p>
               </div>
               <button
                 onClick={() => setNegotiatingPlayer(null)}
@@ -469,18 +799,26 @@ export const TransfersView: React.FC<TransfersViewProps> = ({
             <div className="space-y-4 mb-5 text-xs">
               <div>
                 <label className="block text-neutral-400 uppercase font-semibold text-[10px] mb-1">
-                  Transfer Fee Offer ({effectiveCurrency.symbol} {effectiveCurrency.code})
+                  Transfer Fee ({effectiveCurrency.symbol} {effectiveCurrency.code})
                 </label>
-                <input
-                  type="number"
-                  step="50000"
-                  value={bidFee}
-                  onChange={e => setBidFee(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 font-mono-numbers focus:outline-none focus:border-emerald-500"
-                />
-                <span className="text-[10px] text-emerald-400 font-mono-numbers mt-0.5 block">
-                  Equivalent: {formatMoney(bidFee, { compact: true })}
-                </span>
+                {negotiatingPlayer.clubId === 'free_agents' ? (
+                  <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/50 text-emerald-300 font-mono-numbers font-bold">
+                    FREE TRANSFER (£0 Transfer Fee — Player is unattached Free Agent)
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      type="number"
+                      step="50000"
+                      value={bidFee}
+                      onChange={e => setBidFee(Number(e.target.value))}
+                      className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 font-mono-numbers focus:outline-none focus:border-emerald-500"
+                    />
+                    <span className="text-[10px] text-emerald-400 font-mono-numbers mt-0.5 block">
+                      Equivalent: {formatMoney(bidFee, { compact: true })}
+                    </span>
+                  </>
+                )}
               </div>
 
               <div>

@@ -432,12 +432,27 @@ export function calculatePlayerOverall(pos: RugbyPosition, attrs: PlayerAttribut
   return Math.min(99, Math.max(50, Math.round(score)));
 }
 
+import {
+  NATURAL_SECONDARY_POSITIONS,
+  getNaturalSecondaryPositions,
+  ensurePlayerHasMinimumPositions
+} from './rugbyPositions';
+
+export {
+  NATURAL_SECONDARY_POSITIONS,
+  getNaturalSecondaryPositions,
+  ensurePlayerHasMinimumPositions
+};
+
+
 // Generate realistic squad for any club
 export function generateClubSquad(club: Club): Player[] {
   // Use official verified URC player database when available (1,091 real players)
   const officialPlayers = urcRegistry.searchPlayers({ clubId: club.id, season: '2025-26' });
   if (officialPlayers && officialPlayers.length >= 25) {
-    return JSON.parse(JSON.stringify(officialPlayers));
+    const list: Player[] = JSON.parse(JSON.stringify(officialPlayers));
+    list.forEach(p => ensurePlayerHasMinimumPositions(p));
+    return list;
   }
 
   const players: Player[] = [];
@@ -449,8 +464,8 @@ export function generateClubSquad(club: Club): Player[] {
       { name: 'Ethan Hooker', primaryPosition: 'OUTSIDE_CENTRE', secondaryPositions: ['INSIDE_CENTRE', 'LEFT_WING'], nationality: 'South Africa', age: 21, potential: 92 },
       { name: 'Makazole Mapimpi', primaryPosition: 'LEFT_WING', secondaryPositions: ['RIGHT_WING'], nationality: 'South Africa', age: 33, potential: 91 },
       { name: 'Ox Nche', primaryPosition: 'LH_PROP', secondaryPositions: ['TH_PROP'], nationality: 'South Africa', age: 29, potential: 95 },
-      { name: 'Bongi Mbonambi', primaryPosition: 'HOOKER', secondaryPositions: [], nationality: 'South Africa', age: 33, potential: 92 },
-      { name: 'Grant Williams', primaryPosition: 'SCRUM_HALF', secondaryPositions: ['RIGHT_WING'], nationality: 'South Africa', age: 27, potential: 93 },
+      { name: 'Bongi Mbonambi', primaryPosition: 'HOOKER', secondaryPositions: ['LH_PROP', 'TH_PROP'], nationality: 'South Africa', age: 33, potential: 92 },
+      { name: 'Grant Williams', primaryPosition: 'SCRUM_HALF', secondaryPositions: ['RIGHT_WING', 'FLY_HALF'], nationality: 'South Africa', age: 27, potential: 93 },
       {
         name: 'Andre Esterhuizen',
         primaryPosition: 'INSIDE_CENTRE',
@@ -483,7 +498,7 @@ export function generateClubSquad(club: Club): Player[] {
       },
       { name: 'Evan Roos', primaryPosition: 'NUMBER_8', secondaryPositions: ['OPENSIDE_FLANKER'], nationality: 'South Africa', age: 24, potential: 92 },
       { name: 'Salmaan Moerat', primaryPosition: 'LOCK_5', secondaryPositions: ['LOCK_4'], nationality: 'South Africa', age: 26, potential: 89 },
-      { name: 'Herschel Jantjies', primaryPosition: 'SCRUM_HALF', secondaryPositions: [], nationality: 'South Africa', age: 28, potential: 87 },
+      { name: 'Herschel Jantjies', primaryPosition: 'SCRUM_HALF', secondaryPositions: ['FLY_HALF', 'RIGHT_WING'], nationality: 'South Africa', age: 28, potential: 87 },
       { name: 'Dan du Plessis', primaryPosition: 'INSIDE_CENTRE', secondaryPositions: ['OUTSIDE_CENTRE'], nationality: 'South Africa', age: 29, potential: 88 },
       { name: 'Warrick Gelant', primaryPosition: 'RIGHT_WING', secondaryPositions: ['FULLBACK'], nationality: 'South Africa', age: 29, potential: 88 }
     ],
@@ -609,21 +624,75 @@ export function generateClubSquad(club: Club): Player[] {
     ]
   };
 
-  const genericFirstNamesByCountry: Record<string, string[]> = {
-    'South Africa': ['Ruan', 'Cobus', 'Duan', 'Tiaan', 'Kobus', 'Sikhumbuzo', 'Sbu', 'Wandisile', 'Morné', 'Corne', 'Francois', 'Jaco', 'Luan', 'Sazi', 'Willem', 'Boeta'],
-    'Ireland': ['Conor', 'Jack', 'Ronan', 'Finlay', 'Craig', 'Cian', 'Robbie', 'Jordan', 'Caelan', 'Peter', 'Ryan', 'Tommy', 'Ross', 'Dan', 'Sam', 'Jimmy'],
-    'Scotland': ['Duhan', 'Zander', 'Rory', 'Matt', 'Huw', 'Ali', 'Ben', 'Jamie', 'Pierre', 'George', 'Kyle', 'Darcy'],
-    'Wales': ['Ellis', 'Dewi', 'Jac', 'Mason', 'Keelan', 'Ioan', 'Gareth', 'Dillon', 'Taine', 'Rhys', 'Sam', 'Callum'],
-    'Italy': ['Paolo', 'Ange', 'Tommaso', 'Michele', 'Danilo', 'Sebastian', 'Ignacio', 'Giacomo', 'Lorenzo', 'Federico']
-  };
+ const genericFirstNamesByCountry: Record<string, string[]> = {
+  'South Africa': [
+    // Afrikaans / Engels
+    'Ruan', 'Cobus', 'Duan', 'Tiaan', 'Kobus', 'Morné', 'Corné', 'Francois', 'Jaco', 'Luan', 'Willem', 'Boeta', 'Eben', 'Handré', 'Pieter-Steph', 'Damian', 'Steven', 'Jesse', 'Cheslin', 'Kurt-Lee', 'Grant', 'Marco', 'Franco', 'Evan', 'Ruben', 'Manie', 'Lukhanyo',
+    // IsiXhosa / IsiZulu / Sotho / Tswana
+    'Sikhumbuzo', 'Sbu', 'Wandisile', 'Sazi', 'Siya', 'Makazole', 'Ox', 'Bongi', 'Trevor', 'Aphelele', 'Thabang', 'Kwagga', 'Mapimpi', 'Ntuthuko', 'Kagiso', 'Siphosethu', 'Tshepo', 'Siphesihle', 'Lizo', 'Thabo', 'Sibusiso', 'Sanele', 'Bandise',
+    // Suid-Asiaties / Gemengde Erfenis
+    'Zaheer', 'Tariq', 'Ameer', 'Hashim', 'Imraan', 'Keanu', 'Chesney'
+  ],
+  'Ireland': [
+    // Tradisioneel Iers / Gaelic
+    'Conor', 'Jack', 'Ronan', 'Finlay', 'Craig', 'Cian', 'Robbie', 'Jordan', 'Caelan', 'Peter', 'Ryan', 'Tommy', 'Ross', 'Dan', 'Sam', 'Jimmy', 'Tadhg', 'Garry', 'Hugo', 'Mack', 'Cillain', 'Fiachra', 'Oisín', 'Cormac', 'Cathal', 'Eoin', 'Caoimhín', 'Darragh',
+    // Moderne / Kulturele Diversiteit
+    'Bundee', 'Jamison', 'Jeremy', 'Milton', 'Joey', 'Antoine', 'Kieran', 'Jason'
+  ],
+  'Scotland': [
+    // Tradisioneel Skots / Kelties
+    'Duhan', 'Zander', 'Rory', 'Matt', 'Huw', 'Ali', 'Ben', 'Jamie', 'Pierre', 'George', 'Kyle', 'Darcy', 'Finn', 'Hamish', 'Blair', 'Ewan', 'Callum', 'Greig', 'Fraser', 'Duncan', 'Archie', 'Magnus', 'Angus', 'Alastair',
+    // Pasifiese / Afrika / Divers
+    'Sione', 'Ewan', 'Murphy', 'Glen', 'Stafford', 'Ollie', 'Arron'
+  ],
+  'Wales': [
+    // Tradisioneel Wallies
+    'Ellis', 'Dewi', 'Jac', 'Mason', 'Keelan', 'Ioan', 'Gareth', 'Dillon', 'Taine', 'Rhys', 'Sam', 'Callum', 'Iestyn', 'Alun', 'Wyn', 'Taulupe', 'George', 'Liam', 'Tomos', 'Dafydd', 'Gethin', 'Harri', 'Aled', 'Rhodri', 'Lydiate',
+    // Divers
+    'Christ', 'Faletau', 'Leon', 'Rio', 'Aaron', 'Regan'
+  ],
+  'Italy': [
+    // Tradisioneel Italiaans
+    'Paolo', 'Ange', 'Tommaso', 'Michele', 'Danilo', 'Sebastian', 'Ignacio', 'Giacomo', 'Lorenzo', 'Federico', 'Matteo', 'Pietro', 'Gianmarco', 'Alessandro', 'Niccolò', 'Marco', 'Andrea', 'Edoardo', 'Luca', 'Giovanni', 'Davide', 'Riccardo', 'Simone',
+    // Divers / Nuwe Inwoners (Argentyns, Pasifies, ens.)
+    'Juan', 'Ivan', 'Monty', 'Martin', 'Stephen', 'Toa', 'Hame'
+  ]
+};
 
-  const genericLastNamesByCountry: Record<string, string[]> = {
-    'South Africa': ['van der Merwe', 'du Plessis', 'Botha', 'Coetzee', 'Pretorius', 'Venter', 'Steyn', 'Schoeman', 'Kruger', 'Fourie', 'Potgieter', 'le Roux', 'Erasmus', 'Bester'],
-    'Ireland': ['O’Mahony', 'Murray', 'Henshaw', 'Aki', 'Beirne', 'Henderson', 'Larmour', 'Kelleher', 'Ringrose', 'Baird', 'Prendergast', 'Coombes', 'Casey'],
-    'Scotland': ['van der Merwe', 'Russell', 'Tuipulotu', 'Jones', 'Fagerson', 'Ritchie', 'Darge', 'Dobie', 'White', 'Kinghorn'],
-    'Wales': ['Williams', 'Davies', 'Jones', 'Evans', 'Thomas', 'Roberts', 'Lewis', 'Hughes', 'Morgan', 'Griffiths'],
-    'Italy': ['Garbisi', 'Capuozzo', 'Menoncello', 'Brex', 'Negri', 'Lamaro', 'Ferrari', 'Lucchesi', 'Ruzza', 'Fischetti']
-  };
+const genericLastNamesByCountry: Record<string, string[]> = {
+  'South Africa': [
+    // Afrikaans / Europese oorsprong
+    'van der Merwe', 'du Plessis', 'Botha', 'Coetzee', 'Pretorius', 'Venter', 'Steyn', 'Schoeman', 'Kruger', 'Fourie', 'Potgieter', 'le Roux', 'Erasmus', 'Bester', 'de Klerk', 'Mostert', 'Wiese', 'van Staden', 'Cronjé', 'Kriel', 'Willemse', 'Hendrikse', 'Reinach', 'Arendse', 'Davids', 'Geldenhuys',
+    // Nguni / Sotho-Tswana / Afrika oorsprong
+    'Kolisi', 'Nche', 'Mbonambi', 'Am', 'Mapimpi', 'Fassi', 'Nzekeni', 'Moerat', 'Nyakane', 'Dweba', 'Mchunu', 'Ntini', 'Tshituka', 'Macingwane', 'Molefe', 'Mahlangu', 'Nkosi', 'Sithole', 'Dlamini', 'Zheng',
+    // Suid-Asiatiese / Gemengde oorsprong
+    'Patel', 'Adams', 'Abrahams', 'Sultana', 'Solomons', 'Pillay', 'Khan'
+  ],
+  'Ireland': [
+    // Tradisioneel Iers
+    'O’Mahony', 'Murray', 'Henshaw', 'Aki', 'Beirne', 'Henderson', 'Larmour', 'Kelleher', 'Ringrose', 'Baird', 'Prendergast', 'Coombes', 'Casey', 'Sexton', 'O’Brien', 'McCarthy', 'Furlong', 'Gibson-Park', 'van der Flier', 'Lowe', 'McCloskey', 'Healy', 'Herring', 'Timoney', 'Crowley', 'Nash',
+    // Divers
+    'Aki', 'Hansen', 'Carbery', 'Halagahu'
+  ],
+  'Scotland': [
+    // Tradisioneel Skots
+    'van der Merwe', 'Russell', 'Tuipulotu', 'Jones', 'Fagerson', 'Ritchie', 'Darge', 'Dobie', 'White', 'Kinghorn', 'Graham', 'Hogg', 'Maitland', 'Schoeman', 'McDowall', 'Dempsey', 'Ramsay', 'MacDonald', 'Stewart', 'Hamilton', 'Paterson', 'Morrison',
+    // Divers
+    'Ashman', 'Redpath', 'Bayliss', 'Crosbie'
+  ],
+  'Wales': [
+    // Tradisioneel Wallies
+    'Williams', 'Davies', 'Jones', 'Evans', 'Thomas', 'Roberts', 'Lewis', 'Hughes', 'Morgan', 'Griffiths', 'Jenkins', 'Reffell', 'Rowlands', 'Domachowski', 'Assiratti', 'Beard', 'Wainwright', 'Costelow', 'Llewellyn', 'Adams', 'Dyer', 'North',
+    // Divers
+    'Faletau', 'Tshiunza', 'Grade', 'Zammit'
+  ],
+  'Italy': [
+    // Tradisioneel Italiaans
+    'Garbisi', 'Capuozzo', 'Menoncello', 'Brex', 'Negri', 'Lamaro', 'Ferrari', 'Lucchesi', 'Ruzza', 'Fischetti', 'Varney', 'Zambonin', 'Cannone', 'Nicotera', 'Zuliani', 'Ceccarelli', 'Mori', 'Pani', 'Ioane', 'Page-Relo', 'Zanon', 'Vintcent', 'Gesi',
+    // Divers
+    'Halafihi', 'Lynagh', 'Ginesi'
+  ]
+};
 
   const clubStarList = starDefinitions[club.id] || [];
 
@@ -707,23 +776,13 @@ export function generateClubSquad(club: Club): Player[] {
       const marketValue = Math.round(Math.pow(overall / 10, 3.8) * 85);
       const weeklyWage = Math.round((marketValue / 100) * 1.6);
 
-      const defaultSecondaries: Partial<Record<RugbyPosition, RugbyPosition[]>> = {
-        LH_PROP: ['TH_PROP'],
-        TH_PROP: ['LH_PROP'],
-        HOOKER: [],
-        LOCK_4: ['LOCK_5'],
-        LOCK_5: ['LOCK_4'],
-        BLINDSIDE_FLANKER: ['NUMBER_8', 'OPENSIDE_FLANKER'],
-        OPENSIDE_FLANKER: ['BLINDSIDE_FLANKER', 'NUMBER_8'],
-        NUMBER_8: ['BLINDSIDE_FLANKER'],
-        SCRUM_HALF: [],
-        FLY_HALF: ['INSIDE_CENTRE'],
-        LEFT_WING: ['RIGHT_WING', 'FULLBACK'],
-        RIGHT_WING: ['LEFT_WING', 'FULLBACK'],
-        INSIDE_CENTRE: ['OUTSIDE_CENTRE'],
-        OUTSIDE_CENTRE: ['INSIDE_CENTRE', 'RIGHT_WING'],
-        FULLBACK: ['LEFT_WING', 'RIGHT_WING']
-      };
+      let assignedSecondaries = star?.secondaryPositions && star.secondaryPositions.length > 0
+        ? [...star.secondaryPositions]
+        : getNaturalSecondaryPositions(pos);
+      assignedSecondaries = assignedSecondaries.filter(p => p !== pos);
+      if (assignedSecondaries.length === 0) {
+        assignedSecondaries = getNaturalSecondaryPositions(pos);
+      }
 
       players.push({
         id,
@@ -732,7 +791,7 @@ export function generateClubSquad(club: Club): Player[] {
         age,
         clubId: club.id,
         primaryPosition: pos,
-        secondaryPositions: star?.secondaryPositions || defaultSecondaries[pos] || [],
+        secondaryPositions: assignedSecondaries,
         hybridLevel: star?.hybridLevel || 'NONE',
         approvedCrossUnitPositions: star?.approvedCrossUnitPositions || [],
         heightCm: height,

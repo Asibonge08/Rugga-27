@@ -18,6 +18,7 @@ import { soundFx } from './soundFx';
 import { getRivalry } from '../data/rugbyRivalries';
 import { getMoraleTier, getConfidenceModifier } from './playerMoraleService';
 import { SubstitutionService } from './substitutionService';
+import { JERSEY_TO_POSITION } from '../data/rugbyDatabase';
 
 export interface VisualPlayer {
   id: string;
@@ -192,6 +193,24 @@ export class RugbyMatchEngine {
     this.setupKickoff('home');
   }
 
+  public createDefaultStats(playerId: string): InMatchPlayerStats {
+    return {
+      playerId,
+      rating: 6.5,
+      tries: 0,
+      conversions: 0,
+      penalties: 0,
+      tacklesMade: 0,
+      tacklesMissed: 0,
+      turnoversWon: 0,
+      metresCarried: 0,
+      carries: 0,
+      yellowCard: false,
+      redCard: false,
+      injured: false
+    };
+  }
+
   private initializePlayers(
     homeSquad: Player[],
     awaySquad: Player[],
@@ -211,6 +230,7 @@ export class RugbyMatchEngine {
       const effectiveOverall = Math.min(99, Math.max(50, Math.round(baseOverall + confidenceModifier)));
       const confidenceSpeedBonus = confidenceModifier * 0.12;
       const startingEnergy = Math.max(30, Math.min(100, p.fitness || 95));
+      const playerSpeed = p.attributes?.speed ?? 70;
 
       return {
         id: p.id,
@@ -223,24 +243,10 @@ export class RugbyMatchEngine {
         vy: 0,
         targetX: team === 'home' ? 40 : 60,
         targetY: 35,
-        speed: Math.max(3.8, 4.5 + (p.attributes.speed / 99) * 4.0 + confidenceSpeedBonus),
+        speed: Math.max(3.8, 4.5 + (playerSpeed / 99) * 4.0 + confidenceSpeedBonus),
         isCarrier: false,
         state: 'idle',
-        stats: {
-          playerId: p.id,
-          rating: 6.5,
-          tries: 0,
-          conversions: 0,
-          penalties: 0,
-          tacklesMade: 0,
-          tacklesMissed: 0,
-          turnoversWon: 0,
-          metresCarried: 0,
-          carries: 0,
-          yellowCard: false,
-          redCard: false,
-          injured: false
-        },
+        stats: this.createDefaultStats(p.id),
         morale: moraleScore,
         confidenceTier,
         confidenceModifier,
@@ -248,8 +254,40 @@ export class RugbyMatchEngine {
         effectiveOverall,
         kickingAttr,
         energy: startingEnergy,
-        primaryPosition: p.primaryPosition,
-        secondaryPositions: p.secondaryPositions,
+        primaryPosition: p.primaryPosition || JERSEY_TO_POSITION[num] || 'BLINDSIDE_FLANKER',
+        secondaryPositions: p.secondaryPositions || [],
+        isInjuredInMatch: false,
+        strugglingPlayingOn: false
+      };
+    };
+
+    const createFallback = (num: number, team: 'home' | 'away'): VisualPlayer => {
+      const club = team === 'home' ? this.homeClub : this.awayClub;
+      const fallbackId = `${club.id}_pl_${num}`;
+      return {
+        id: fallbackId,
+        name: `${club.shortName} #${num}`,
+        number: num,
+        team,
+        x: team === 'home' ? 40 : 60,
+        y: 35,
+        vx: 0,
+        vy: 0,
+        targetX: team === 'home' ? 40 : 60,
+        targetY: 35,
+        speed: 5.5,
+        isCarrier: false,
+        state: 'idle',
+        stats: this.createDefaultStats(fallbackId),
+        morale: 80,
+        confidenceTier: 'CONTENT',
+        confidenceModifier: 0,
+        overall: 78,
+        effectiveOverall: 78,
+        kickingAttr: 70,
+        energy: 95,
+        primaryPosition: JERSEY_TO_POSITION[num] || 'BLINDSIDE_FLANKER',
+        secondaryPositions: [],
         isInjuredInMatch: false,
         strugglingPlayingOn: false
       };
@@ -257,15 +295,23 @@ export class RugbyMatchEngine {
 
     for (let num = 1; num <= 15; num++) {
       const hId = homeLineup[num];
-      const hPlayer = homeSquad.find(p => p.id === hId) || homeSquad[num - 1] || homeSquad[0];
+      const hPlayer = (homeSquad && homeSquad.length > 0)
+        ? (homeSquad.find(p => p.id === hId) || homeSquad[num - 1] || homeSquad[0])
+        : null;
       if (hPlayer) {
         this.homePlayers.push(createVisual(hPlayer, num, 'home'));
+      } else {
+        this.homePlayers.push(createFallback(num, 'home'));
       }
 
       const aId = awayLineup[num];
-      const aPlayer = awaySquad.find(p => p.id === aId) || awaySquad[num - 1] || awaySquad[0];
+      const aPlayer = (awaySquad && awaySquad.length > 0)
+        ? (awaySquad.find(p => p.id === aId) || awaySquad[num - 1] || awaySquad[0])
+        : null;
       if (aPlayer) {
         this.awayPlayers.push(createVisual(aPlayer, num, 'away'));
+      } else {
+        this.awayPlayers.push(createFallback(num, 'away'));
       }
     }
 
@@ -322,6 +368,14 @@ export class RugbyMatchEngine {
       p === 'CONVERSION' ||
       p === 'TRY_SCORED' ||
       p === 'HALF_TIME';
+  }
+
+  public stageSubstitution(
+    onPitchJersey: number,
+    benchPlayerId: string,
+    isInjurySub: boolean = false
+  ): { success: boolean; message: string; sub?: QueuedSubstitution } {
+    return this.queueSubstitution(onPitchJersey, benchPlayerId, isInjurySub);
   }
 
   public queueSubstitution(
@@ -669,16 +723,20 @@ export class RugbyMatchEngine {
   }
 
   private giveBallToPlayer(player: VisualPlayer) {
+    if (!player) return;
     this.ball.carrierId = player.id;
     this.ball.state = 'carried';
     this.ball.z = 0;
     this.ball.x = player.x;
     this.ball.y = player.y;
 
-    this.homePlayers.forEach(p => p.isCarrier = (p.id === player.id));
-    this.awayPlayers.forEach(p => p.isCarrier = (p.id === player.id));
+    this.homePlayers.forEach(p => { if (p) p.isCarrier = (p.id === player.id); });
+    this.awayPlayers.forEach(p => { if (p) p.isCarrier = (p.id === player.id); });
 
     player.state = 'carrying';
+    if (!player.stats) {
+      player.stats = this.createDefaultStats(player.id);
+    }
     player.stats.carries++;
   }
 
@@ -1325,14 +1383,16 @@ export class RugbyMatchEngine {
 
     if (option === 'POSTS') {
       const kicker = players.find(p => p.id === kickerPlayerId) || players.find(p => p.number === 10) || players[0];
-      this.chosenPenaltyKickerId = kicker.id;
-      this.setupPenaltyKick(awardedTo, kicker);
-      this.play();
+      if (kicker) {
+        this.chosenPenaltyKickerId = kicker.id;
+        this.setupPenaltyKick(awardedTo, kicker);
+        this.play();
+      }
     } else if (option === 'CORNER_LINEOUT') {
       soundFx.playKick();
       const kicker = players.find(p => p.id === kickerPlayerId) || players.find(p => p.number === 10) || players[0];
       const touchX = awardedTo === 'home' ? Math.min(95, this.ball.x + 32) : Math.max(5, this.ball.x - 32);
-      this.addEvent('PENALTY_DECISION', `${kicker.name} boots penalty to touch! 5m attacking lineout for ${club.shortName}.`, club.id, kicker.id);
+      this.addEvent('PENALTY_DECISION', `${kicker ? kicker.name : 'Fly-half'} boots penalty to touch! 5m attacking lineout for ${club.shortName}.`, club.id, kicker?.id);
       this.callLineout(awardedTo, touchX, 5);
       this.play();
     } else if (option === 'SCRUM') {
@@ -1342,14 +1402,16 @@ export class RugbyMatchEngine {
     } else if (option === 'TAP_AND_GO') {
       soundFx.playWhistle('short');
       const runner = players.find(p => p.id === kickerPlayerId) || players.find(p => p.number === 9) || players[0];
-      this.giveBallToPlayer(runner);
-      this.resetPlayerStates();
-      this.state.phase = 'OPEN_PLAY';
-      this.state.phaseTimer = 3.5;
-      runner.state = 'carrying';
-      runner.vx = awardedTo === 'home' ? 3.0 : -3.0;
-      this.addEvent('PENALTY_DECISION', `⚡ QUICK TAP & GO! ${runner.name} attacks the retreating defence!`, club.id, runner.id);
-      this.play();
+      if (runner) {
+        this.giveBallToPlayer(runner);
+        this.resetPlayerStates();
+        this.state.phase = 'OPEN_PLAY';
+        this.state.phaseTimer = 3.5;
+        runner.state = 'carrying';
+        runner.vx = awardedTo === 'home' ? 3.0 : -3.0;
+        this.addEvent('PENALTY_DECISION', `⚡ QUICK TAP & GO! ${runner.name} attacks the retreating defence!`, club.id, runner.id);
+        this.play();
+      }
     }
   }
 
@@ -1429,6 +1491,7 @@ export class RugbyMatchEngine {
   }
 
   private scoreTry(scorer: VisualPlayer) {
+    if (!scorer) return;
     this.applyPendingSubstitutions();
     soundFx.playCrowdCheer();
     soundFx.playWhistle('short');
@@ -1442,6 +1505,9 @@ export class RugbyMatchEngine {
       this.state.awayTries++;
     }
 
+    if (!scorer.stats) {
+      scorer.stats = this.createDefaultStats(scorer.id);
+    }
     scorer.stats.tries++;
     scorer.stats.rating = Math.min(10.0, scorer.stats.rating + 1.2);
     scorer.state = 'celebrating';
@@ -1457,9 +1523,10 @@ export class RugbyMatchEngine {
     this.state.phaseTimer = 3.0;
 
     const kickerTeam = this.state.possessionTeam;
-    const kicker = (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 10) ||
-                   (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 15) ||
-                   this.homePlayers[0];
+    const players = kickerTeam === 'home' ? this.homePlayers : this.awayPlayers;
+    const kicker = players.find(p => p.number === 10) ||
+                   players.find(p => p.number === 15) ||
+                   players[0];
 
     // Place tee at suitable distance
     const teeX = kickerTeam === 'home' ? 82 : 18;
@@ -1475,23 +1542,34 @@ export class RugbyMatchEngine {
       state: 'placed_for_kick'
     };
 
-    kicker.targetX = kickerTeam === 'home' ? teeX - 3 : teeX + 3;
-    kicker.targetY = teeY;
-    kicker.state = 'kicking';
-
-    this.addCommentary(`${kicker.name} lines up the conversion kick...`);
+    if (kicker) {
+      kicker.targetX = kickerTeam === 'home' ? teeX - 3 : teeX + 3;
+      kicker.targetY = teeY;
+      kicker.state = 'kicking';
+      this.addCommentary(`${kicker.name} lines up the conversion kick...`);
+    }
   }
 
   private resolveConversion() {
     soundFx.playKick();
     const kickerTeam = this.state.possessionTeam;
-    const kicker = (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 10) ||
-                   (kickerTeam === 'home' ? this.homePlayers : this.awayPlayers).find(p => p.number === 15) ||
-                   this.homePlayers[0];
+    const players = kickerTeam === 'home' ? this.homePlayers : this.awayPlayers;
+    const kicker = players.find(p => p.number === 10) ||
+                   players.find(p => p.number === 15) ||
+                   players[0];
+
+    if (!kicker) {
+      this.setupKickoff(kickerTeam === 'home' ? 'away' : 'home');
+      return;
+    }
+
+    if (!kicker.stats) {
+      kicker.stats = this.createDefaultStats(kicker.id);
+    }
 
     // Conversion probability based on kicker attribute & in-game confidence
-    const baseChance = (kicker.kickingAttr / 100) * 88;
-    const moraleBoost = kicker.confidenceModifier * 2.2;
+    const baseChance = ((kicker.kickingAttr || 70) / 100) * 88;
+    const moraleBoost = (kicker.confidenceModifier || 0) * 2.2;
     const successProb = Math.max(0.25, Math.min(0.96, (baseChance + moraleBoost) / 100));
     const success = Math.random() < successProb;
 
@@ -1518,6 +1596,8 @@ export class RugbyMatchEngine {
 
     const players = team === 'home' ? this.homePlayers : this.awayPlayers;
     const kicker = chosenKicker || (this.chosenPenaltyKickerId ? players.find(p => p.id === this.chosenPenaltyKickerId) : null) || players.find(p => p.number === 10) || players[0];
+    if (!kicker) return;
+
     this.chosenPenaltyKickerId = kicker.id;
     this.ball.state = 'placed_for_kick';
     kicker.state = 'kicking';
@@ -1531,13 +1611,22 @@ export class RugbyMatchEngine {
     const players = kickerTeam === 'home' ? this.homePlayers : this.awayPlayers;
     const kicker = (this.chosenPenaltyKickerId ? players.find(p => p.id === this.chosenPenaltyKickerId) : null) || players.find(p => p.number === 10) || players[0];
 
+    if (!kicker) {
+      this.setupKickoff(kickerTeam === 'home' ? 'away' : 'home');
+      return;
+    }
+
+    if (!kicker.stats) {
+      kicker.stats = this.createDefaultStats(kicker.id);
+    }
+
     const postsX = kickerTeam === 'home' ? 100 : 0;
     const distance = Math.hypot(postsX - this.ball.x, 35 - this.ball.y);
     const yDiff = Math.abs(35 - this.ball.y);
-    const baseChance = (kicker.kickingAttr / 100) * 94;
+    const baseChance = ((kicker.kickingAttr || 70) / 100) * 94;
     const distPenalty = Math.max(0, (distance - 20) * 1.35);
     const angPenalty = yDiff * 0.75;
-    const moraleBonus = kicker.confidenceModifier * 2.5;
+    const moraleBonus = (kicker.confidenceModifier || 0) * 2.5;
     const successProb = Math.max(0.15, Math.min(0.96, (baseChance - distPenalty - angPenalty + moraleBonus) / 100));
 
     const success = Math.random() < successProb;
@@ -1550,7 +1639,7 @@ export class RugbyMatchEngine {
         this.state.awayScore += 3;
       }
       kicker.stats.penalties++;
-      const confTag = kicker.confidenceModifier > 0 ? ' [High Confidence]' : kicker.confidenceModifier < 0 ? ' [Under Pressure]' : '';
+      const confTag = (kicker.confidenceModifier || 0) > 0 ? ' [High Confidence]' : (kicker.confidenceModifier || 0) < 0 ? ' [Under Pressure]' : '';
       this.addEvent('PENALTY_GOAL', `PENALTY GOAL! Clean strike by ${kicker.name} sails over the crossbar from ${Math.round(distance)}m! (+3 pts)${confTag}`, kickerTeam === 'home' ? this.homeClub.id : this.awayClub.id, kicker.id);
       this.chosenPenaltyKickerId = null;
       this.setupKickoff(kickerTeam === 'home' ? 'away' : 'home');
@@ -1651,39 +1740,57 @@ export class RugbyMatchEngine {
 
       // Random scoring events in statistical window
       if (Math.random() < 0.045) {
-        const homeFavored = this.homeClub.reputation >= this.awayClub.reputation;
+        const homeFavored = (this.homeClub?.reputation ?? 80) >= (this.awayClub?.reputation ?? 80);
         const isHome = Math.random() < (homeFavored ? 0.6 : 0.45);
         const team = isHome ? 'home' : 'away';
         const players = isHome ? this.homePlayers : this.awayPlayers;
-        const scorer = players[Math.floor(Math.random() * players.length)];
 
-        if (Math.random() < 0.65) {
-          // Try
-          if (isHome) {
-            this.state.homeScore += 5;
-            this.state.homeTries++;
-          } else {
-            this.state.awayScore += 5;
-            this.state.awayTries++;
-          }
-          scorer.stats.tries++;
-          this.addEvent('TRY', `TRY! ${scorer.name} powers across the whitewash!`, isHome ? this.homeClub.id : this.awayClub.id, scorer.id);
+        if (players && players.length > 0) {
+          const scorer = players[Math.floor(Math.random() * players.length)];
+          if (scorer) {
+            if (!scorer.stats) {
+              scorer.stats = this.createDefaultStats(scorer.id);
+            }
 
-          // Conversion
-          if (Math.random() < 0.80) {
-            const kicker = players.find(p => p.number === 10) || players[0];
-            if (isHome) this.state.homeScore += 2;
-            else this.state.awayScore += 2;
-            kicker.stats.conversions++;
-            this.addEvent('CONVERSION_SUCCESS', `Conversion added by ${kicker.name}!`, isHome ? this.homeClub.id : this.awayClub.id, kicker.id);
+            if (Math.random() < 0.65) {
+              // Try
+              if (isHome) {
+                this.state.homeScore += 5;
+                this.state.homeTries++;
+              } else {
+                this.state.awayScore += 5;
+                this.state.awayTries++;
+              }
+              scorer.stats.tries++;
+              this.addEvent('TRY', `TRY! ${scorer.name} powers across the whitewash!`, isHome ? this.homeClub.id : this.awayClub.id, scorer.id);
+
+              // Conversion
+              if (Math.random() < 0.80) {
+                const kicker = players.find(p => p.number === 10) || players[0];
+                if (kicker) {
+                  if (!kicker.stats) {
+                    kicker.stats = this.createDefaultStats(kicker.id);
+                  }
+                  if (isHome) this.state.homeScore += 2;
+                  else this.state.awayScore += 2;
+                  kicker.stats.conversions++;
+                  this.addEvent('CONVERSION_SUCCESS', `Conversion added by ${kicker.name}!`, isHome ? this.homeClub.id : this.awayClub.id, kicker.id);
+                }
+              }
+            } else {
+              // Penalty Goal
+              const kicker = players.find(p => p.number === 10) || players[0];
+              if (kicker) {
+                if (!kicker.stats) {
+                  kicker.stats = this.createDefaultStats(kicker.id);
+                }
+                if (isHome) this.state.homeScore += 3;
+                else this.state.awayScore += 3;
+                kicker.stats.penalties++;
+                this.addEvent('PENALTY_GOAL', `Penalty kick successfully slotted by ${kicker.name}!`, isHome ? this.homeClub.id : this.awayClub.id, kicker.id);
+              }
+            }
           }
-        } else {
-          // Penalty Goal
-          const kicker = players.find(p => p.number === 10) || players[0];
-          if (isHome) this.state.homeScore += 3;
-          else this.state.awayScore += 3;
-          kicker.stats.penalties++;
-          this.addEvent('PENALTY_GOAL', `Penalty kick successfully slotted by ${kicker.name}!`, isHome ? this.homeClub.id : this.awayClub.id, kicker.id);
         }
       }
 
@@ -1707,16 +1814,20 @@ export class RugbyMatchEngine {
     const awayStatsMap: Record<string, InMatchPlayerStats> = {};
 
     this.homePlayers.forEach(p => {
+      if (!p) return;
+      const stats = p.stats || this.createDefaultStats(p.id);
       homeStatsMap[p.id] = {
-        ...p.stats,
-        rating: Math.min(10.0, Math.max(5.0, Number((6.2 + Math.random() * 2.2 + (p.stats.tries * 1.0)).toFixed(1))))
+        ...stats,
+        rating: Math.min(10.0, Math.max(5.0, Number((6.2 + Math.random() * 2.2 + ((stats.tries || 0) * 1.0)).toFixed(1))))
       };
     });
 
     this.awayPlayers.forEach(p => {
+      if (!p) return;
+      const stats = p.stats || this.createDefaultStats(p.id);
       awayStatsMap[p.id] = {
-        ...p.stats,
-        rating: Math.min(10.0, Math.max(5.0, Number((6.2 + Math.random() * 2.2 + (p.stats.tries * 1.0)).toFixed(1))))
+        ...stats,
+        rating: Math.min(10.0, Math.max(5.0, Number((6.2 + Math.random() * 2.2 + ((stats.tries || 0) * 1.0)).toFixed(1))))
       };
     });
 
@@ -1731,8 +1842,8 @@ export class RugbyMatchEngine {
       awayPenalties: Math.floor(Math.random() * 3),
       homeDropGoals: 0,
       awayDropGoals: 0,
-      homeTryScorers: this.homePlayers.filter(p => p.stats.tries > 0).map(p => p.name),
-      awayTryScorers: this.awayPlayers.filter(p => p.stats.tries > 0).map(p => p.name),
+      homeTryScorers: this.homePlayers.filter(p => p && p.stats && p.stats.tries > 0).map(p => p.name),
+      awayTryScorers: this.awayPlayers.filter(p => p && p.stats && p.stats.tries > 0).map(p => p.name),
       events: this.state.events,
       homePlayerStats: homeStatsMap,
       awayPlayerStats: awayStatsMap

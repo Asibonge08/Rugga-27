@@ -678,3 +678,95 @@ export function recalculateBatchRatings(players: Player[]): {
   };
 }
 
+export interface MatchActionMetrics {
+  tries: number;
+  conversions: number;
+  penalties: number;
+  dropGoals?: number;
+  tacklesMade: number;
+  tacklesMissed: number;
+  turnoversWon: number;
+  metresCarried: number;
+  carries: number;
+  lineBreaks?: number;
+  defendersBeaten?: number;
+  errors?: number;
+  kickMetres?: number;
+  tryAssists?: number;
+  lineBreakPasses?: number;
+  scrumPenaltiesWon?: number;
+}
+
+/**
+ * POSITION-SPECIFIC MATCH RATING ENGINE:
+ * Evaluates role-specific impact rather than raw action volume.
+ *
+ * 1. Outside Back & Winger Formula (e.g., Cheslin Kolbe, Ethan Hooker):
+ *    - Heavy positive weighting on Metres, Line Breaks, Defenders Beaten, Tries, Clean Breaks.
+ *    - Low tackle/ruck counts are not penalized.
+ *    - Formula Spec: Rating = Base(6.0) + (Tries * 1.5) + (LineBreaks * 1.0) + (DefendersBeaten * 0.4) + (Meters * 0.03) - (Errors * 0.8)
+ *
+ * 2. Forward Formula:
+ *    - Heavy weighting on tackles, ruck turnovers, scrum penalties won, and carry metres.
+ *
+ * 3. Playmaker / Fly-Half Formula:
+ *    - Weighted on kick metres, try assists, line-break passes, and goal-kicking accuracy.
+ */
+export function calculatePositionMatchRating(
+  position: RugbyPosition,
+  metrics: MatchActionMetrics
+): number {
+  const isBack = BACK_POSITIONS.includes(position);
+  const isOutsideBack = position === 'LEFT_WING' || position === 'RIGHT_WING' || position === 'FULLBACK' || position === 'OUTSIDE_CENTRE';
+  const isPlaymaker = position === 'FLY_HALF' || position === 'INSIDE_CENTRE';
+  const isScrumHalf = position === 'SCRUM_HALF';
+
+  let rawRating = 6.0;
+
+  if (isOutsideBack) {
+    const lineBreaks = metrics.lineBreaks ?? Math.floor(metrics.metresCarried / 28);
+    const defendersBeaten = metrics.defendersBeaten ?? Math.floor(metrics.metresCarried / 16);
+    const errors = metrics.errors ?? (metrics.tacklesMissed > 2 ? 1 : 0);
+
+    // Outside Back Formula
+    rawRating = 6.0 +
+      (metrics.tries * 1.5) +
+      (lineBreaks * 1.0) +
+      (defendersBeaten * 0.4) +
+      (metrics.metresCarried * 0.03) -
+      (errors * 0.8);
+  } else if (isPlaymaker || isScrumHalf) {
+    const kickMetres = metrics.kickMetres ?? (isPlaymaker ? metrics.metresCarried * 1.5 : metrics.metresCarried * 0.6);
+    const tryAssists = metrics.tryAssists ?? (metrics.tries > 0 ? 0 : Math.min(2, Math.floor(metrics.carries / 6)));
+    const lineBreakPasses = metrics.lineBreakPasses ?? Math.floor(metrics.carries / 4);
+    const goalKicksMade = metrics.conversions + metrics.penalties;
+    const errors = metrics.errors ?? (metrics.tacklesMissed > 1 ? 1 : 0);
+
+    // Playmaker Formula
+    rawRating = 6.0 +
+      (metrics.tries * 1.3) +
+      (kickMetres * 0.015) +
+      (tryAssists * 1.2) +
+      (lineBreakPasses * 0.6) +
+      (goalKicksMade * 0.4) +
+      (metrics.turnoversWon * 0.6) +
+      (metrics.tacklesMade * 0.15) -
+      (errors * 0.7);
+  } else {
+    // Forwards (Props, Hookers, Locks, Flankers, Number 8)
+    const scrumBonus = metrics.scrumPenaltiesWon ?? (isFrontRow(position) ? 1 : 0);
+
+    // Forward Formula
+    rawRating = 6.0 +
+      (metrics.tacklesMade * 0.25) +
+      (metrics.turnoversWon * 0.8) +
+      (metrics.metresCarried * 0.04) +
+      (metrics.tries * 1.2) +
+      (scrumBonus * 0.5) -
+      (metrics.tacklesMissed * 0.4);
+  }
+
+  // Clamp rating between 3.5 and 10.0
+  return Math.min(10.0, Math.max(3.5, Math.round(rawRating * 10) / 10));
+}
+

@@ -195,6 +195,7 @@ export interface Player {
     sustainedWeek?: number;
   } | null;
   isRestedThisWeek?: boolean;
+  consecutiveStarts?: number; // Number of consecutive matches started without rest (forces rotation at 4-5)
   trainingEfficiency?: number; // 0-100% based on fatigue and injury
   sinBinMinutesRemaining?: number; // In-match tracking
   injuryHistory?: InjuryRecord[]; // Full career and seasonal injury history
@@ -233,6 +234,8 @@ export interface Player {
   verifiedDate?: string;
   isVerifiedRealPlayer?: boolean;
   seasonId?: SeasonId;
+  developmentScore?: number;
+  developmentVerdict?: 'BREAKTHROUGH' | 'RAPID_GROWTH' | 'STEADY' | 'STAGNATION' | 'DECLINE';
 }
 
 export interface InjuryRecord {
@@ -563,7 +566,8 @@ export type MatchEventType =
   | 'RIVALRY_SCUFFLE'
   | 'RIVALRY_BIG_HIT'
   | 'RIVALRY_DISPUTE'
-  | 'RIVALRY_HEROIC_TURNOVER';
+  | 'RIVALRY_HEROIC_TURNOVER'
+  | 'PENALTY_DECISION';
 
 export interface MatchEvent {
   minute: number;
@@ -604,6 +608,11 @@ export interface InboxMessage {
   read: boolean;
   requiresAction?: boolean;
   actionPayload?: any;
+  actionRoute?: {
+    screen: 'dashboard' | 'squad' | 'tactics' | 'competitions' | 'transfers' | 'registry' | 'training' | 'finances' | 'academy' | 'inbox';
+    targetEntityId?: string;
+    label?: string;
+  };
 }
 
 export interface TransferOffer {
@@ -636,3 +645,129 @@ export interface StaffMember {
   weeklySalary: number;
   contractYears: number;
 }
+
+export type SeasonPhase = 'REGULAR_SEASON' | 'PLAYOFFS' | 'OFF_SEASON' | 'PRE_SEASON';
+
+export interface SeasonAwards {
+  seasonYear: number;
+  championClubId: string;
+  championClubName: string;
+  mvpPlayerId: string;
+  mvpPlayerName: string;
+  mvpClubName: string;
+  mvpRating: number;
+  topTryScorerId: string;
+  topTryScorerName: string;
+  topTryCount: number;
+  topTryClubName: string;
+  goldenBootId: string;
+  goldenBootName: string;
+  goldenBootPoints: number;
+  goldenBootClubName: string;
+}
+
+export interface OffSeasonSummaryData {
+  seasonYear: number;
+  nextSeasonYear: number;
+  careerYear: number;
+  champion: { id: string; name: string };
+  userFinishPosition: number;
+  prizeMoney: number;
+  seasonTicketRevenue: number;
+  boardSatisfaction: number;
+  awards: SeasonAwards;
+  retiredPlayers: {
+    id: string;
+    name: string;
+    age: number;
+    clubName: string;
+    position: RugbyPosition;
+    freedWage: number;
+    wasUserPlayer: boolean;
+  }[];
+  expiredToFreeAgents: {
+    id: string;
+    name: string;
+    age: number;
+    position: RugbyPosition;
+    overall: number;
+    wasUserPlayer: boolean;
+  }[];
+  youthGraduates: {
+    id: string;
+    name: string;
+    position: RugbyPosition;
+    age: number;
+    overall: number;
+    potential: number;
+  }[];
+  breakoutPlayers: {
+    id: string;
+    name: string;
+    oldPotential: number;
+    newPotential: number;
+    overall: number;
+    wasUserPlayer: boolean;
+    developmentScore?: number;
+    reason?: string;
+  }[];
+  stagnatedPlayers?: {
+    id: string;
+    name: string;
+    age: number;
+    position: RugbyPosition;
+    oldPotential: number;
+    newPotential: number;
+    overall: number;
+    wasUserPlayer: boolean;
+    developmentScore: number;
+    reason: string;
+  }[];
+}
+
+export interface PlayerDevelopmentResult {
+  playerId: string;
+  playerName: string;
+  age: number;
+  position: RugbyPosition;
+  clubId: string;
+  developmentScore: number; // 0 - 100
+  verdict: 'BREAKTHROUGH' | 'RAPID_GROWTH' | 'STEADY' | 'STAGNATION' | 'DECLINE';
+  oldPotential: number;
+  newPotential: number;
+  oldOverall: number;
+  newOverall: number;
+  explanation: string;
+  factors: {
+    matchExperience: number;
+    formRating: number;
+    keyContributions: number;
+    workEthic: number;
+  };
+}
+
+export interface HistoricalSeasonRecord {
+  seasonYear: number;
+  careerYear: number;
+  championClubId: string;
+  championClubName: string;
+  userClubId: string;
+  userFinishPosition: number;
+  awards: SeasonAwards;
+  finalTable: LeagueTableRow[];
+}
+
+export interface CareerMilestone {
+  id: string;
+  title: string;
+  description: string;
+  category: 'STREAK' | 'ACADEMY' | 'TROPHY' | 'MATCH' | 'FINANCE' | 'REPUTATION';
+  tier: 'BRONZE' | 'SILVER' | 'GOLD' | 'PLATINUM';
+  icon: string; // 'Flame' | 'Trophy' | 'Sparkles' | 'Shield' | 'Target' | 'Crown' | 'Coins' | 'Users' | 'Building2'
+  unlocked: boolean;
+  unlockedDate?: string;
+  progress: number;
+  target: number;
+  rewardCoins: number;
+}
+

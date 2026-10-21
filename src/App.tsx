@@ -17,7 +17,8 @@ import { CurrencySelector } from './components/CurrencySelector';
 import { CoinStoreModal } from './components/CoinStoreModal';
 import { EditHubView } from './components/EditHubView';
 import { soundFx } from './services/soundFx';
-import { INITIAL_CLUBS } from './data/rugbyDatabase';
+import { OffSeasonSummaryModal } from './components/OffSeasonSummaryModal';
+import { INITIAL_CLUBS, generateClubSquad } from './data/rugbyDatabase';
 import { Fixture, TacticsConfig } from './types/rugby';
 import {
   LayoutDashboard,
@@ -49,6 +50,7 @@ export function App() {
   const [quickMatchLineup, setQuickMatchLineup] = useState<{ startingXV: Record<number, string>; bench: Record<number, string> } | null>(null);
   const [quickMatchTactics, setQuickMatchTactics] = useState<TacticsConfig | null>(null);
   const [isRegistryModalOpen, setIsRegistryModalOpen] = useState<boolean>(false);
+  const [isOffSeasonModalOpen, setIsOffSeasonModalOpen] = useState<boolean>(false);
 
   useEffect(() => {
     const unsub = careerManager.subscribe(newState => {
@@ -142,8 +144,10 @@ export function App() {
 
   const homeClub = careerState.clubs.find(c => c.id === activeFixture?.homeClubId) || userClub;
   const awayClub = careerState.clubs.find(c => c.id === activeFixture?.awayClubId) || careerState.clubs[1];
-  const homeSquad = careerState.players.filter(p => p.clubId === homeClub.id);
-  const awaySquad = careerState.players.filter(p => p.clubId === awayClub.id);
+  const homeSquadRaw = careerState.players.filter(p => p.clubId === homeClub.id);
+  const awaySquadRaw = careerState.players.filter(p => p.clubId === awayClub.id);
+  const homeSquad = homeSquadRaw.length >= 15 ? homeSquadRaw : generateClubSquad(homeClub);
+  const awaySquad = awaySquadRaw.length >= 15 ? awaySquadRaw : generateClubSquad(awayClub);
 
   const unreadCount = careerState.inbox.filter(m => !m.read).length;
 
@@ -330,8 +334,38 @@ export function App() {
         </div>
       </header>
 
+      {/* Mobile Sub-Navigation Header: Horizontal Touch Scroll Bar for quick mobile access */}
+      <nav className="lg:hidden sticky top-[57px] z-30 w-full bg-neutral-900/95 backdrop-blur-md border-b border-neutral-800 px-2.5 py-1.5 flex items-center space-x-1.5 overflow-x-auto no-scrollbar shadow-sm">
+        {navItems.map(item => {
+          const Icon = item.icon;
+          const isActive = activeTab === item.id;
+          return (
+            <button
+              key={`mob_top_${item.id}`}
+              onClick={() => {
+                soundFx.playClick();
+                setActiveTab(item.id);
+              }}
+              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 whitespace-nowrap shrink-0 transition-all cursor-pointer ${
+                isActive
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'bg-neutral-800/60 text-neutral-400 hover:text-white hover:bg-neutral-800'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              <span>{item.label}</span>
+              {item.badge && (
+                <span className="w-3.5 h-3.5 rounded-full bg-amber-500 text-neutral-950 font-bold text-[8px] flex items-center justify-center font-mono-numbers">
+                  {item.badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </nav>
+
       {/* Main Viewport Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 pb-20 lg:pb-8">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 pb-24 lg:pb-8">
         {activeTab === 'dashboard' && (
           <DashboardView
             state={careerState}
@@ -340,6 +374,7 @@ export function App() {
               soundFx.playClick();
               setActiveTab(tab);
             }}
+            onOpenOffSeasonSummary={() => setIsOffSeasonModalOpen(true)}
           />
         )}
 
@@ -413,31 +448,29 @@ export function App() {
           <InboxView
             messages={careerState.inbox}
             onMarkAsRead={(id) => careerManager.markMessageAsRead(id)}
+            onMarkAllAsRead={() => careerManager.markAllMessagesAsRead()}
+            onNavigateTab={(tab) => {
+              soundFx.playClick();
+              setActiveTab(tab.toLowerCase());
+            }}
           />
         )}
       </main>
 
-      {/* Mobile Touch Bottom Navigation Bar (Tailored for Android devices) */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-neutral-900/95 backdrop-blur-md border-t border-neutral-800 px-2 py-1.5 flex items-center justify-around shadow-2xl">
-        {[
-          { id: 'dashboard', label: 'Home', icon: LayoutDashboard },
-          { id: 'squad', label: 'Squad', icon: Users },
-          { id: 'tactics', label: 'Tactics', icon: Zap },
-          { id: 'transfers', label: 'Market', icon: ArrowRightLeft },
-          { id: 'registry', label: 'Registry', icon: Database },
-          { id: 'inbox', label: 'Inbox', icon: Mail, badge: unreadCount > 0 ? unreadCount : undefined }
-        ].map(item => {
+      {/* Mobile Touch Bottom Navigation Bar (Tailored for mobile touch devices) */}
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-neutral-900/95 backdrop-blur-md border-t border-neutral-800 px-2 py-1.5 flex items-center space-x-1 overflow-x-auto no-scrollbar shadow-2xl">
+        {navItems.map(item => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
           return (
             <button
-              key={item.id}
+              key={`mob_bot_${item.id}`}
               onClick={() => {
                 soundFx.playClick();
                 setActiveTab(item.id);
               }}
-              className={`flex flex-col items-center justify-center py-1 px-2 rounded-xl transition-all cursor-pointer relative ${
-                isActive ? 'text-emerald-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'
+              className={`flex flex-col items-center justify-center py-1 px-2.5 min-w-[58px] shrink-0 rounded-xl transition-all cursor-pointer relative ${
+                isActive ? 'text-emerald-400 font-bold bg-neutral-800/60' : 'text-neutral-400 hover:text-neutral-200'
               }`}
             >
               <div className="relative">
@@ -448,7 +481,7 @@ export function App() {
                   </span>
                 )}
               </div>
-              <span className="text-[10px] mt-0.5 tracking-tight">{item.label}</span>
+              <span className="text-[10px] mt-0.5 tracking-tight whitespace-nowrap">{item.label}</span>
             </button>
           );
         })}
@@ -474,6 +507,19 @@ export function App() {
           userClub={userClub}
           coins={careerState.coins || 0}
           onClose={() => setIsCoinStoreOpen(false)}
+        />
+      )}
+
+      {/* Off-Season Summary & Transition Modal */}
+      {(isOffSeasonModalOpen || (careerState.seasonPhase === 'OFF_SEASON' && careerState.lastOffSeasonSummary && activeTab === 'dashboard')) && careerState.lastOffSeasonSummary && (
+        <OffSeasonSummaryModal
+          data={careerState.lastOffSeasonSummary}
+          clubCountry={userClub.country}
+          onProceedToPreSeason={() => {
+            careerManager.proceedToPreSeason();
+            setIsOffSeasonModalOpen(false);
+          }}
+          onClose={() => setIsOffSeasonModalOpen(false)}
         />
       )}
     </div>

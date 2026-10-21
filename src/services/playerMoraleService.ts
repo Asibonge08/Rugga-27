@@ -77,16 +77,31 @@ export function getMoraleVisuals(tier: MoraleTier): {
 }
 
 /**
- * Calculates in-game rating modifier from current morale score (-3 to +3 OVR)
+ * Calculates in-game rating modifier from current morale score:
+ * - High morale (>=70): grants minor temporary stat boost (+1 to +3 OVR)
+ * - Content (55-69): baseline (0 OVR)
+ * - Low morale (<55): applies OVR penalty (-2 to -5 OVR) and increases error rates
  */
 export function getConfidenceModifier(score: number): number {
-  if (score >= 90) return 2.5;
-  if (score >= 82) return 1.5;
-  if (score >= 74) return 1.0;
-  if (score >= 58) return 0;
-  if (score >= 46) return -1.0;
-  if (score >= 35) return -2.0;
-  return -3.0;
+  if (score >= 90) return 3.0;
+  if (score >= 80) return 2.0;
+  if (score >= 70) return 1.0;
+  if (score >= 55) return 0;
+  if (score >= 45) return -2.0;
+  if (score >= 35) return -3.0;
+  if (score >= 25) return -4.0;
+  return -5.0;
+}
+
+/**
+ * Calculates in-game handling error rate multiplier based on morale
+ */
+export function getMoraleErrorRateMultiplier(score: number): number {
+  if (score >= 88) return 0.65; // Peak morale: 35% fewer handling errors
+  if (score >= 75) return 0.80; // High morale: 20% fewer handling errors
+  if (score >= 55) return 1.00; // Content baseline
+  if (score >= 35) return 1.35; // Discontent: +35% error rate
+  return 1.65;                  // Low morale: +65% handling / penalty error rate
 }
 
 /**
